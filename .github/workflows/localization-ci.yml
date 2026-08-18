@@ -38,6 +38,6 @@ jobs:
         with:
           enable-cache: true
       - working-directory: backend
-        run: uv sync --frozen
+        run: uv sync --frozen --extra dev
       - working-directory: backend
         run: uv run pytest tests/test_language_validation.py tests/test_app_settings.py
