@@ -1,11 +1,11 @@
 name: Build localized image
 
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - '*-localized.*'
+  workflow_run:
+    workflows:
+      - Localization CI
+    types:
+      - completed
   workflow_dispatch:
     inputs:
       tag:
@@ -19,9 +19,14 @@ permissions:
 
 jobs:
   build:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - name: Select immutable image tag
         id: image
         shell: bash
@@ -31,8 +36,6 @@ jobs:
           set -euo pipefail
           if [[ -n "${REQUESTED_TAG}" ]]; then
             tag="${REQUESTED_TAG}"
-          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            tag="${GITHUB_REF_NAME}"
           else
             tag="$(tr -d '\r\n' < version.txt)-localized.${GITHUB_RUN_NUMBER}"
           fi
