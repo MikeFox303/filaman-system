@@ -10,7 +10,15 @@ import Layout from '../layouts/Layout.astro'
     .pagination-pages a:hover { text-decoration: underline; background: color-mix(in srgb, var(--accent) 10%, transparent); }
     .pagination-pages .page-current { font-weight: 700; color: var(--accent); padding: 2px 8px; background: color-mix(in srgb, var(--accent) 15%, transparent); border-radius: 3px; }
     .pagination-pages .page-ellipsis { color: var(--text-muted); padding: 0 2px; }
-    .fm-table .col-spool-id { width: 6ch; max-width: 6ch; white-space: nowrap; padding: 10px 4px 10px 8px; }
+    .spool-log-table { min-width: 860px; }
+    .spool-log-table .col-spool-id { width: 6ch; max-width: 6ch; white-space: nowrap; padding: 10px 4px 10px 8px; }
+    .spool-log-table .col-mfr-color { min-width: 9rem; }
+    .spool-log-table .col-manufacturer { min-width: 10rem; }
+    .spool-log-table .col-material { min-width: 7rem; }
+    .spool-log-table .col-event-type { min-width: 7rem; }
+    .spool-log-table .col-event-date { min-width: 10rem; white-space: nowrap; }
+    .spool-log-table .col-event-weight { min-width: 6rem; white-space: nowrap; }
+    .spool-log-table .col-event-note { min-width: 12rem; }
   </style>
   <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
     <h1 style="font-size: 1.8rem; font-weight: 700; margin: 0; font-family: var(--font-serif);" data-i18n="spoolLog.title">Spool Log</h1>
@@ -21,17 +29,18 @@ import Layout from '../layouts/Layout.astro'
   </div>
 
   <div class="fm-card" style="padding: 0;">
-    <table class="fm-table">
+    <div class="fm-table-scroll">
+    <table class="fm-table spool-log-table">
       <thead>
         <tr style="background: var(--bg-soft);">
           <th class="col-spool-id" data-i18n="spoolLog.spool">Spool</th>
-          <th data-i18n="spools.colMfrColor">Mfr. Color</th>
-          <th data-i18n="spools.manufacturer">Manufacturer</th>
-          <th data-i18n="spools.material">Material</th>
-          <th data-i18n="spoolLog.eventType">Type</th>
-          <th data-i18n="spoolLog.eventDate">Date</th>
-          <th data-i18n="spoolLog.eventWeight">Weight</th>
-          <th data-i18n="spoolLog.eventNote">Note</th>
+          <th class="col-mfr-color" data-i18n="spools.colMfrColor">Mfr. Color</th>
+          <th class="col-manufacturer" data-i18n="spools.manufacturer">Manufacturer</th>
+          <th class="col-material" data-i18n="spools.material">Material</th>
+          <th class="col-event-type" data-i18n="spoolLog.eventType">Type</th>
+          <th class="col-event-date" data-i18n="spoolLog.eventDate">Date</th>
+          <th class="col-event-weight" data-i18n="spoolLog.eventWeight">Weight</th>
+          <th class="col-event-note" data-i18n="spoolLog.eventNote">Note</th>
         </tr>
       </thead>
       <tbody id="events-table">
@@ -40,6 +49,7 @@ import Layout from '../layouts/Layout.astro'
         </tr>
       </tbody>
     </table>
+    </div>
   </div>
 
   <div class="pagination-container" id="pagination" style="margin-top: 16px;"></div>
@@ -93,22 +103,22 @@ import Layout from '../layouts/Layout.astro'
           <td class="col-spool-id">
             <a href="/spools/${e.spool_id}" style="color: var(--accent); text-decoration: none; font-weight: 500;">#${e.spool_id}</a>
           </td>
-          <td style="padding: 12px; font-size: 0.85rem; color: var(--text); white-space: nowrap;">
+          <td class="col-mfr-color" style="padding: 12px; font-size: 0.85rem; color: var(--text); white-space: nowrap;">
             <span style="display: inline-flex; align-items: center; gap: 6px;">${renderMfrColorCell(e.colors, e.manufacturer_color_name)}</span>
           </td>
-          <td style="padding: 12px; font-size: 0.85rem; color: var(--text-muted);">${escapeHtml(e.manufacturer_name) || '-'}</td>
-          <td style="padding: 12px; font-size: 0.85rem; color: var(--text-muted);">${escapeHtml(e.material_type) || '-'}</td>
-          <td style="padding: 12px;">
+          <td class="col-manufacturer" style="padding: 12px; font-size: 0.85rem; color: var(--text-muted);">${escapeHtml(e.manufacturer_name) || '-'}</td>
+          <td class="col-material" style="padding: 12px; font-size: 0.85rem; color: var(--text-muted);">${escapeHtml(e.material_type) || '-'}</td>
+          <td class="col-event-type" style="padding: 12px;">
             <span class="fm-pill" style="${getEventTypeStyle(e.event_type)}">${e.event_type}</span>
           </td>
-          <td style="padding: 12px; font-size: 0.85rem; color: var(--text-muted);">
+          <td class="col-event-date" style="padding: 12px; font-size: 0.85rem; color: var(--text-muted);">
             ${new Date(e.event_at).toLocaleString()}
           </td>
-          <td style="padding: 12px; font-family: monospace; font-size: 0.85rem;">
+          <td class="col-event-weight" style="padding: 12px; font-family: monospace; font-size: 0.85rem;">
             ${e.measured_weight_g !== null ? e.measured_weight_g.toFixed(0) + 'g' : ''}
             ${e.delta_weight_g !== null ? (e.delta_weight_g > 0 ? '+' : '') + e.delta_weight_g.toFixed(0) + 'g' : ''}
           </td>
-          <td style="padding: 12px; font-size: 0.85rem; color: var(--text-muted);">${e.note || '-'}</td>
+          <td class="col-event-note" style="padding: 12px; font-size: 0.85rem; color: var(--text-muted);">${e.note || '-'}</td>
         </tr>
       `).join('')
     }

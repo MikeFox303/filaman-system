@@ -519,10 +519,18 @@ body {
   font-size: 0.9rem;
 }
 
-/* Enable horizontal scroll on mobile for tables inside cards */
+/* Legacy fallback for tables that have not yet opted into an explicit scroll area. */
 .fm-card:has(> .fm-table),
 .fm-card:has(> table) {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Keep the scrollbar scoped to the table, not the entire card. */
+.fm-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
 }
 
