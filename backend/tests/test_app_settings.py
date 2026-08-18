@@ -127,6 +127,19 @@ class TestAppSettingsAdmin:
         assert response.status_code == 422
 
     @pytest.mark.asyncio
+    async def test_put_app_settings_accepts_ukrainian_hryvnia(self, auth_client):
+        client, csrf_token = auth_client
+
+        response = await client.put(
+            "/api/v1/admin/app-settings/",
+            json={"currency": "UAH"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["currency"] == "UAH"
+
+    @pytest.mark.asyncio
     async def test_put_app_settings_currency_null_partial_update(self, auth_client):
         """PUT /admin/app-settings with currency=null should preserve existing value."""
         client, csrf_token = auth_client

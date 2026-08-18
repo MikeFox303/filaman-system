@@ -31,7 +31,7 @@ import Layout from '../../layouts/Layout.astro'
           <th data-i18n="printers.driver">Driver</th>
           <th data-i18n="common.status">Status</th>
           <th data-i18n="common.online">Online</th>
-          <th>Slots</th>
+          <th data-i18n="printers.slotsLabel">Slots</th>
           <th style="text-align: right;" data-i18n="common.actions">Actions</th>
         </tr>
       </thead>
@@ -130,12 +130,12 @@ import Layout from '../../layouts/Layout.astro'
       const tags: string[] = []
       const tagStyle = 'display:inline-block;padding:2px 8px;font-size:0.7rem;border-radius:999px;background:var(--bg-soft);color:var(--text-muted);margin-right:4px;white-space:nowrap;'
       if (summary.external_spool) {
-        tags.push(`<span style="${tagStyle}">Ext: 1 Slot</span>`)
+        tags.push(`<span style="${tagStyle}">${t('printers.externalSlot')}: ${t('printers.slots', { count: 1 })}</span>`)
       }
       if (summary.ams_units && summary.ams_units.length > 0) {
         for (const unit of summary.ams_units) {
           const label = summary.ams_type === 'AMS Lite' ? 'AMS Lite' : `AMS ${unit.ams_id + 1}`
-          tags.push(`<span style="${tagStyle}">${label}: ${unit.tray_count} Slots</span>`)
+          tags.push(`<span style="${tagStyle}">${label}: ${t('printers.slots', { count: unit.tray_count })}</span>`)
         }
       }
       return tags.length > 0 ? tags.join('') : '\u2014'

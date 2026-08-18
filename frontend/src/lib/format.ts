@@ -1,7 +1,7 @@
 export function formatPrice(value: number | null | undefined, currency: string): string {
   if (value == null) return '–';
   const lang = localStorage.getItem('lang') || 'en';
-  const locale = lang === 'de' ? 'de-DE' : 'en-US';
+  const locale = ({ de: 'de-DE', ru: 'ru-RU', uk: 'uk-UA' } as Record<string, string>)[lang] || 'en-US';
   return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(value);
 }
 

@@ -172,7 +172,7 @@ import Layout from '../../layouts/Layout.astro'
   <!-- Detail Modal -->
   <div id="detail-modal" class="fm-modal-overlay">
     <div class="fm-card" style="width: 100%; max-width: 32rem; margin: 0 1rem; padding: 24px;">
-      <h3 id="detail-title" style="font-size: 1.15rem; font-weight: 600; margin-bottom: 16px;">Plugin Details</h3>
+      <h3 id="detail-title" style="font-size: 1.15rem; font-weight: 600; margin-bottom: 16px;" data-i18n="admin.pluginDetails">Plugin Details</h3>
       <div id="detail-content" style="display: flex; flex-direction: column; gap: 12px; font-size: 0.9rem;"></div>
       <div style="margin-top: 16px;">
         <button type="button" id="detail-close" class="fm-btn fm-btn-outline" data-i18n="common.close">Close</button>
@@ -438,7 +438,7 @@ import Layout from '../../layouts/Layout.astro'
       title.textContent = plugin.name
       
       const rows = [
-        { label: 'Plugin Key', value: plugin.plugin_key },
+        { label: t('admin.pluginKey'), value: plugin.plugin_key },
         { label: t('admin.pluginVersion'), value: plugin.version },
         { label: t('admin.pluginType'), value: plugin.plugin_type },
         { label: t('admin.pluginAuthor'), value: plugin.author || '-' },

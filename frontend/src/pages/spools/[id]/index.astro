@@ -1448,7 +1448,7 @@ const { id } = Astro.params
           }
         }
 
-        const inheritedBadge = isInherited ? `<span style="font-size: 0.7rem; color: var(--text-muted); opacity: 0.7;" title="${t('printers.inheritedFromFilament') || 'Inherited from filament'}">&#8593; Filament</span>` : ''
+        const inheritedBadge = isInherited ? `<span style="font-size: 0.7rem; color: var(--text-muted); opacity: 0.7;" title="${t('printers.inheritedFromFilament')}">&#8593; ${t('spools.filament')}</span>` : ''
 
         return `<div class="param-row" style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px;">
           <label style="flex: 1; font-size: 0.85rem; font-weight: 500; color: var(--text-muted);">${fd.label} ${inheritedBadge}</label>
@@ -1644,7 +1644,7 @@ const { id } = Astro.params
           // Printer name + slot count
           html += `<div style="min-width:80px;">` +
             `<div style="font-size:0.8rem;font-weight:600;white-space:nowrap;">${printer.name}</div>` +
-            `<div style="font-size:0.65rem;color:var(--text-muted);">${slots.length} Slots</div>` +
+            `<div style="font-size:0.65rem;color:var(--text-muted);">${t('printers.slots', { count: slots.length })}</div>` +
             `</div>`
 
           // Toolheads

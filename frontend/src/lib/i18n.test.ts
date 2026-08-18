@@ -20,4 +20,13 @@ describe('i18n language selection', () => {
     expect(t('dashboard.lowStockSpools')).toBe('Катушки с низким остатком')
     expect(t('dashboard.noData')).toBe('Нет данных')
   })
+
+  it('selects Ukrainian and exposes Ukrainian interface text', () => {
+    setLang('uk')
+
+    expect(getLang()).toBe('uk')
+    expect(document.documentElement.lang).toBe('uk')
+    expect(t('settings.langUk')).toBe('Українська')
+    expect(t('nav.dashboard')).toBe('Огляд')
+  })
 })

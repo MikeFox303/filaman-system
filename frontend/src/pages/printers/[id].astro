@@ -343,10 +343,10 @@ const { id } = Astro.params
             </div>
             ${driverHealth?.running && driverHealth?.connected ? `
               <div id="health-summary" style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;">
-                ${driverHealth.printer_model || driverHealth.external_spool ? `<span style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;background:var(--bg-soft);border-radius:999px;font-size:0.8rem;color:var(--text-muted);">${driverHealth.printer_model ? escapeHtml(driverHealth.printer_model) : ''}${driverHealth.printer_model && driverHealth.external_spool ? ' · ' : ''}${driverHealth.external_spool ? '1 ext. Slot' : ''}</span>` : ''}
+                ${driverHealth.printer_model || driverHealth.external_spool ? `<span style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;background:var(--bg-soft);border-radius:999px;font-size:0.8rem;color:var(--text-muted);">${driverHealth.printer_model ? escapeHtml(driverHealth.printer_model) : ''}${driverHealth.printer_model && driverHealth.external_spool ? ' · ' : ''}${driverHealth.external_spool ? t('printers.externalSlot') : ''}</span>` : ''}
                 ${(driverHealth.ams_units || []).map((u: any) => {
                   const amsLabel = (driverHealth.ams_type === 'AMS Lite') ? 'AMS Lite' : ('AMS ' + (u.ams_id + 1))
-                  const parts = [amsLabel, u.tray_count + ' Slots']
+                  const parts = [amsLabel, t('printers.slots', { count: u.tray_count })]
                   if (u.serial) parts.push('SN: ' + u.serial)
                   return '<span style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;background:var(--bg-soft);border-radius:999px;font-size:0.8rem;color:var(--text-muted);">' + parts.join(' · ') + '</span>'
                 }).join('')}
@@ -369,7 +369,7 @@ const { id } = Astro.params
               <div style="font-weight: 600; font-size: 0.95rem;">${amsLabel}</div>
               ${ams.serial ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">SN: ${escapeHtml(ams.serial)}</div>` : ''}
               <div style="display: flex; gap: 14px; margin-top: 8px; font-size: 0.8rem; color: var(--text-muted);">
-                <span style="display:inline-flex;align-items:center;gap:4px;"><img src="/slots.svg" alt="" style="width:14px;height:14px;opacity:0.6;">${ams.tray_count} Slots</span>
+                <span style="display:inline-flex;align-items:center;gap:4px;"><img src="/slots.svg" alt="" style="width:14px;height:14px;opacity:0.6;">${t('printers.slots', { count: ams.tray_count })}</span>
                 <span style="display:inline-flex;align-items:center;gap:4px;"><img src="/moisture.svg" alt="" style="width:14px;height:14px;opacity:0.6;">${humidity}</span>
                 <span style="display:inline-flex;align-items:center;gap:4px;"><img src="/temperature.svg" alt="" style="width:14px;height:14px;opacity:0.6;">${temp}</span>
               </div>

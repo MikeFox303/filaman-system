@@ -1,3 +1,3 @@
 from typing import Literal
 
-LanguageCode = Literal["en", "de", "ru"]
+LanguageCode = Literal["en", "de", "ru", "uk"]
