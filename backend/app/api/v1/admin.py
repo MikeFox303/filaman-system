@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import DBSession, PrincipalDep, RequirePermission
+from app.core.language import LanguageCode
 from app.api.v1.schemas import PaginatedResponse
 from app.core.security import generate_token_secret, hash_password_async, hash_token, generate_device_code
 from app.models import Device, Permission, Role, User, UserRole, RolePermission
@@ -34,14 +35,14 @@ class UserCreate(BaseModel):
     email: str
     password: str
     display_name: str | None = None
-    language: str = "en"
+    language: LanguageCode = "en"
     is_superadmin: bool = False
 
 
 class UserUpdate(BaseModel):
     email: str | None = None
     display_name: str | None = None
-    language: str | None = None
+    language: LanguageCode | None = None
     is_active: bool | None = None
     is_superadmin: bool | None = None
 

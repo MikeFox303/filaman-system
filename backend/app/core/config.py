@@ -3,6 +3,8 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.language import LanguageCode
+
 # Go up three levels from config.py -> core -> app -> .env
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -38,7 +40,7 @@ class Settings(BaseSettings):
     admin_email: str | None = None
     admin_password: str | None = None
     admin_display_name: str | None = None
-    admin_language: str = "en"
+    admin_language: LanguageCode = "en"
     admin_superadmin: bool = True
 
     secret_key: str = "change-me-in-production"

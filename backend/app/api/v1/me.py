@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import DBSession, PrincipalDep
 from app.core.csrf import maybe_attach_csrf_cookie
+from app.core.language import LanguageCode
 from app.core.security import hash_password_async, verify_password_async
 from app.models import User, Role, Permission, UserRole, RolePermission
 
@@ -29,7 +30,7 @@ class MeResponse(BaseModel):
 
 class MeUpdate(BaseModel):
     display_name: str | None = None
-    language: str | None = None
+    language: LanguageCode | None = None
 
 
 class ChangePasswordRequest(BaseModel):
