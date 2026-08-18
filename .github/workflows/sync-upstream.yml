@@ -1,0 +1,73 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Merge current upstream into a review branch
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git remote add upstream https://github.com/Fire-Devils/filaman-system.git
+          git fetch upstream main --tags
+          upstream_sha="$(git rev-parse upstream/main)"
+          echo "upstream_sha=${upstream_sha}" >> "${GITHUB_OUTPUT}"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          git switch -C sync/upstream
+          if ! git merge --no-edit upstream/main; then
+            git merge --abort || true
+            echo "conflict=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          git push --force-with-lease origin sync/upstream
+          echo "changed=true" >> "${GITHUB_OUTPUT}"
+          echo "conflict=false" >> "${GITHUB_OUTPUT}"
+      - name: Open or update upstream sync pull request
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          existing="$(gh pr list --head sync/upstream --base main --state open --json number --jq '.[0].number // empty')"
+          if [[ -z "${existing}" ]]; then
+            gh pr create --base main --head sync/upstream --title 'chore: sync Fire-Devils upstream' --body "Automated merge of Fire-Devils/filaman-system@${UPSTREAM_SHA}. Localization CI must pass, and any new English keys must receive Russian and Ukrainian translations before merge."
+          else
+            gh pr edit "${existing}" --body "Automated merge of Fire-Devils/filaman-system@${UPSTREAM_SHA}. Localization CI must pass, and any new English keys must receive Russian and Ukrainian translations before merge."
+          fi
+      - name: Report merge conflicts
+        if: steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          title="Upstream sync conflict: ${UPSTREAM_SHA}"
+          existing="$(gh issue list --state open --search "${title} in:title" --json number --jq '.[0].number // empty')"
+          if [[ -z "${existing}" ]]; then
+            gh issue create --title "${title}" --body "The scheduled upstream merge has conflicts. Resolve them locally against Fire-Devils/filaman-system@${UPSTREAM_SHA}, then run the full localization CI."
+          fi
+          exit 1

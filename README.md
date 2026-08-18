@@ -10,6 +10,10 @@ Empty spools don't belong in the trash! We support the [Recycling Fabrik](https:
 
 *Looking for the German version? Read the [README.de.md](README.de.md).*
 
+### Localized distribution
+
+This repository tracks the official Fire-Devils project and adds complete Russian and Ukrainian interfaces plus UAH currency support. The `main` branch is updated from upstream through reviewed pull requests; localization parity checks prevent new English keys or placeholders from being published without matching translations.
+
 ## About the Project
 FilaMan is a comprehensive filament management system for 3D printing. It helps you keep track of your filament spools, manufacturers, colors, and current stock levels. It also features integrations with printers and AMS (Automatic Material System) units.
 
