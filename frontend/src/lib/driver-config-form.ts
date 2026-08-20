@@ -25,8 +25,15 @@ export interface SchemaProperty {
   default?: unknown
   enum?: unknown[]
   enumNames?: string[]
+  enumNamesByLocale?: Record<string, string[]>
   minimum?: number
   maximum?: number
+}
+
+export function enumLabels(prop: SchemaProperty, lang: string): string[] {
+  return prop.enumNamesByLocale?.[lang]
+    || prop.enumNames
+    || (prop.enum || []).map(String)
 }
 
 /**

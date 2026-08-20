@@ -2,9 +2,22 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildDriverConfigPayload,
+  enumLabels,
   isStructuredProp,
   type SchemaProperty,
 } from './driver-config-form'
+
+describe('enumLabels', () => {
+  it('prefers localized labels and falls back to legacy enumNames', () => {
+    const prop: SchemaProperty = {
+      enum: ['full', 'inventory_only'],
+      enumNames: ['Full', 'Inventory only'],
+      enumNamesByLocale: { ru: ['Полный режим', 'Только инвентарь'] },
+    }
+    expect(enumLabels(prop, 'ru')).toEqual(['Полный режим', 'Только инвентарь'])
+    expect(enumLabels(prop, 'uk')).toEqual(['Full', 'Inventory only'])
+  })
+})
 
 describe('isStructuredProp', () => {
   it.each([

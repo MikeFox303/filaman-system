@@ -22,7 +22,7 @@ const { id } = Astro.params
   <script>
     import { t, initI18n, getLang } from '../../lib/i18n'
     import { getAbortSignal, isAbortError } from '../../lib/abort'
-    import { buildDriverConfigPayload, isStructuredProp } from '../../lib/driver-config-form'
+    import { buildDriverConfigPayload, enumLabels, isStructuredProp } from '../../lib/driver-config-form'
     await initI18n()
 
     const id = window.location.pathname.split('/').filter(Boolean).pop()!
@@ -105,10 +105,11 @@ const { id } = Astro.params
         let displayValue = isSecret ? '••••••••' : escapeHtml(String(value))
         if (!isSecret && isStructuredProp(p, value)) {
           displayValue = `<pre style="margin: 0; font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; overflow-x: auto;">${escapeHtml(JSON.stringify(value, null, 2))}</pre>`
-        } else if (p.enum && Array.isArray(p.enum) && p.enumNames) {
+        } else if (p.enum && Array.isArray(p.enum)) {
           // Enum: Display-Name statt interner Wert anzeigen
           const idx = p.enum.indexOf(value)
-          if (idx >= 0 && p.enumNames[idx]) displayValue = escapeHtml(String(p.enumNames[idx]))
+          const labels = enumLabels(p, getLang())
+          if (idx >= 0 && labels[idx]) displayValue = escapeHtml(String(labels[idx]))
         }
         html += `
           <div>
@@ -149,7 +150,7 @@ const { id } = Astro.params
           const checked = value === true || value === 'true' ? ' checked' : ''
           html += `<input class="fm-checkbox" id="config-${key}" name="${key}" type="checkbox"${checked}>`
         } else if (p.enum && Array.isArray(p.enum)) {
-          const enumNames: string[] = p.enumNames || p.enum
+          const enumNames: string[] = enumLabels(p, getLang())
           const options = p.enum.map((val: string, i: number) => {
             const selected = String(val) === String(value) ? ' selected' : ''
             return `<option value="${escapeHtml(String(val))}"${selected}>${escapeHtml(String(enumNames[i] ?? val))}</option>`
