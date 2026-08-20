@@ -384,6 +384,24 @@ class TestSpoolServiceRecordConsumption:
         assert duplicate.id == first.id
         assert duplicate.delta_weight_g == -50.0
 
+    @pytest.mark.asyncio
+    async def test_distinct_source_event_keys_are_not_aggregated(self, db_session):
+        service = SpoolService(db_session)
+        spool = await _create_test_spool(
+            db_session, remaining_weight_g=750.0, status_key="opened"
+        )
+        event_at = datetime.now(timezone.utc)
+
+        first, _ = await service.record_consumption(
+            spool, 10.0, event_at, source="bambuddy", source_event_key="print-a"
+        )
+        second, remaining = await service.record_consumption(
+            spool, 8.0, event_at, source="bambuddy", source_event_key="print-b"
+        )
+
+        assert second.id != first.id
+        assert remaining == 732.0
+
 
 class TestSpoolServiceConsumptionAggregation:
     """Tests for consumption event aggregation within time window."""
