@@ -1,0 +1,33 @@
+name: Test FilaMan inventory-only image
+
+on:
+  push:
+    branches:
+      - test/x2d-inventory-only-image
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/mikefox303/filaman-system:1.2.42-localized.13
+          labels: |
+            org.opencontainers.image.source=https://github.com/MikeFox303/filaman-system
+            org.opencontainers.image.revision=95655e51933d05637f2a9725c34e3e59d95e6bbe
+            org.opencontainers.image.version=1.2.42-localized.13
