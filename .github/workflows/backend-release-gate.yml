@@ -34,13 +34,12 @@ jobs:
         run: uv run pytest tests/test_spool_service.py -q
 
       - name: SQLite migration upgrade
-        env:
-          DATABASE_URL: sqlite+aiosqlite:///./release_gate_migration.db
         run: |
-          rm -f release_gate_migration.db
-          uv run alembic upgrade heads
-          test -f release_gate_migration.db
-          rm -f release_gate_migration.db
+          MIGRATION_DB="$RUNNER_TEMP/release_gate_migration.db"
+          rm -f "$MIGRATION_DB"
+          DATABASE_URL="sqlite+aiosqlite:///$MIGRATION_DB" uv run alembic upgrade heads
+          test -f "$MIGRATION_DB"
+          rm -f "$MIGRATION_DB"
 
       - name: Full backend test suite
         run: uv run pytest -q
