@@ -33,10 +33,18 @@ def test_upgrade_repairs_only_known_spoolman_import_colors(tmp_path, monkeypatch
         sa.Column("id", sa.Integer, primary_key=True),
         sa.Column("name", sa.String(100), nullable=False),
         sa.Column("hex_code", sa.String(7), nullable=False),
-        sa.Column("created_at", sa.DateTime, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
-        sa.Column("updated_at", sa.DateTime, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
-        sa.Column("created_at", sa.DateTime, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
-        sa.Column("updated_at", sa.DateTime, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column(
+            "created_at",
+            sa.DateTime,
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime,
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
     )
     filaments = sa.Table(
         "filaments",
@@ -121,7 +129,7 @@ def test_upgrade_repairs_only_known_spoolman_import_colors(tmp_path, monkeypatch
 
 
 def test_upgrade_survives_leftover_batch_temp_table(tmp_path):
-    """An interrupted previous run can leave `_alembic_tmp_colors` behind."""
+    """An interrupted previous run can leave a leftover temp table behind."""
     engine = sa.create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
     metadata = sa.MetaData()
     colors = sa.Table(
@@ -130,6 +138,18 @@ def test_upgrade_survives_leftover_batch_temp_table(tmp_path):
         sa.Column("id", sa.Integer, primary_key=True),
         sa.Column("name", sa.String(100), nullable=False),
         sa.Column("hex_code", sa.String(7), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime,
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime,
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
     )
     filaments = sa.Table(
         "filaments",
