@@ -1,0 +1,51 @@
+name: Backend Release Gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/consumption-protocol
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-release-gate.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Sync locked dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Consumption service tests
+        run: uv run pytest tests/test_spool_service.py -q
+
+      - name: Validate Alembic topology
+        run: |
+          HEAD_COUNT="$(uv run alembic heads | grep -E '^[0-9a-zA-Z_]+ ' | wc -l)"
+          test "$HEAD_COUNT" -eq 1
+          uv run alembic heads
+
+      - name: SQLite migration upgrade (production equivalent)
+        run: |
+          MIGRATION_DB="$RUNNER_TEMP/release_gate_migration.db"
+          rm -f "$MIGRATION_DB"
+          DATABASE_URL="sqlite+aiosqlite:///$MIGRATION_DB" uv run alembic upgrade head
+          test -f "$MIGRATION_DB"
+          rm -f "$MIGRATION_DB"
+
+      - name: Full backend test suite
+        run: uv run pytest -q
