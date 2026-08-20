@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select, update, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -436,6 +437,44 @@ class SpoolService:
         meta: dict[str, Any] = {}
 
         if spool.remaining_weight_g is None:
+            try:
+                event = await self._create_event(
+                    spool_id=spool.id,
+                    event_type="print_consumption",
+                    event_at=event_at,
+                    user_id=principal.user_id if principal else None,
+                    device_id=principal.device_id if principal else None,
+                    source=source,
+                    delta_weight_g=delta_weight_g,
+                    note=note,
+                    meta=meta if meta else None,
+                    source_event_key=source_event_key,
+                )
+            except IntegrityError:
+                if not source_event_key:
+                    raise
+                await self.db.rollback()
+                duplicate = await self.db.execute(
+                    select(SpoolEvent).where(
+                        SpoolEvent.source_event_key == source_event_key
+                    )
+                )
+                existing = duplicate.scalar_one_or_none()
+                if existing is None:
+                    raise
+                return existing, None
+            await self.db.commit()
+            return event, None
+
+        remaining = spool.remaining_weight_g + delta_weight_g
+        clamped = False
+
+        if remaining < 0:
+            remaining = 0
+            meta["clamped_to_zero"] = True
+            clamped = True
+
+        try:
             event = await self._create_event(
                 spool_id=spool.id,
                 event_type="print_consumption",
@@ -448,29 +487,20 @@ class SpoolService:
                 meta=meta if meta else None,
                 source_event_key=source_event_key,
             )
-            await self.db.commit()
-            return event, None
-
-        remaining = spool.remaining_weight_g + delta_weight_g
-        clamped = False
-
-        if remaining < 0:
-            remaining = 0
-            meta["clamped_to_zero"] = True
-            clamped = True
-
-        event = await self._create_event(
-            spool_id=spool.id,
-            event_type="print_consumption",
-            event_at=event_at,
-            user_id=principal.user_id if principal else None,
-            device_id=principal.device_id if principal else None,
-            source=source,
-            delta_weight_g=delta_weight_g,
-            note=note,
-            meta=meta if meta else None,
-            source_event_key=source_event_key,
-        )
+        except IntegrityError:
+            if not source_event_key:
+                raise
+            await self.db.rollback()
+            duplicate = await self.db.execute(
+                select(SpoolEvent).where(
+                    SpoolEvent.source_event_key == source_event_key
+                )
+            )
+            existing = duplicate.scalar_one_or_none()
+            if existing is None:
+                raise
+            fresh_spool = await self.db.get(Spool, spool.id)
+            return existing, fresh_spool.remaining_weight_g if fresh_spool else None
 
         spool.remaining_weight_g = remaining
         spool.last_used_at = event_at
