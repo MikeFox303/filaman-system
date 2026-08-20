@@ -364,6 +364,26 @@ class TestSpoolServiceRecordConsumption:
         assert refreshed is not None
         assert refreshed.last_used_at == event_at
 
+    @pytest.mark.asyncio
+    async def test_consumption_source_event_key_is_idempotent(self, db_session):
+        service = SpoolService(db_session)
+        spool = await _create_test_spool(
+            db_session, remaining_weight_g=750.0, status_key="opened"
+        )
+        event_at = datetime.now(timezone.utc)
+
+        first, remaining = await service.record_consumption(
+            spool, 50.0, event_at, source="bambuddy", source_event_key="print-1:17:0:2"
+        )
+        duplicate, duplicate_remaining = await service.record_consumption(
+            spool, 50.0, event_at, source="bambuddy", source_event_key="print-1:17:0:2"
+        )
+
+        assert remaining == 700.0
+        assert duplicate_remaining == 700.0
+        assert duplicate.id == first.id
+        assert duplicate.delta_weight_g == -50.0
+
 
 class TestSpoolServiceConsumptionAggregation:
     """Tests for consumption event aggregation within time window."""
@@ -681,3 +701,4 @@ class TestSpoolServiceRebuildRemainingWeight:
         refreshed = await service.get_spool(spool.id)
         assert refreshed is not None
         assert refreshed.remaining_weight_g is None
+
