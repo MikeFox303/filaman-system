@@ -33,11 +33,17 @@ jobs:
       - name: Consumption service tests
         run: uv run pytest tests/test_spool_service.py -q
 
-      - name: SQLite migration upgrade
+      - name: Validate Alembic topology
+        run: |
+          HEAD_COUNT="$(uv run alembic heads | grep -E '^[0-9a-zA-Z_]+ ' | wc -l)"
+          test "$HEAD_COUNT" -eq 1
+          uv run alembic heads
+
+      - name: SQLite migration upgrade (production equivalent)
         run: |
           MIGRATION_DB="$RUNNER_TEMP/release_gate_migration.db"
           rm -f "$MIGRATION_DB"
-          DATABASE_URL="sqlite+aiosqlite:///$MIGRATION_DB" uv run alembic upgrade heads
+          DATABASE_URL="sqlite+aiosqlite:///$MIGRATION_DB" uv run alembic upgrade head
           test -f "$MIGRATION_DB"
           rm -f "$MIGRATION_DB"
 
