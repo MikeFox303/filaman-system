@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 
 revision: str = "add_spool_event_source_key"
-down_revision: Union[str, Sequence[str], None] = "remove_ams_fields"
+down_revision: Union[str, Sequence[str], None] = "ef529a7422d8"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
