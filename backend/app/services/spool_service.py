@@ -384,11 +384,15 @@ class SpoolService:
                 return existing_by_key, spool.remaining_weight_g
 
         # Check if we can aggregate with a recent event
-        existing_event = await self._get_aggregatable_consumption_event(
-            spool_id=spool.id,
-            source=source,
-            current_time=event_at,
-        )
+        existing_event = None
+        # Keyed external events must remain one row per key. Aggregating them
+        # would discard the second key and make a later replay charge again.
+        if not source_event_key:
+            existing_event = await self._get_aggregatable_consumption_event(
+                spool_id=spool.id,
+                source=source,
+                current_time=event_at,
+            )
 
         if existing_event is not None:
             # Aggregate: update existing event instead of creating new one
