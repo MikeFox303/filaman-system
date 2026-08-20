@@ -129,6 +129,7 @@ class SpoolService:
         user_id: int | None = None,
         device_id: int | None = None,
         source: str | None = None,
+        source_event_key: str | None = None,
         delta_weight_g: float | None = None,
         measured_weight_g: float | None = None,
         from_status_id: int | None = None,
@@ -145,6 +146,7 @@ class SpoolService:
             user_id=user_id,
             device_id=device_id,
             source=source,
+            source_event_key=source_event_key,
             delta_weight_g=delta_weight_g,
             measured_weight_g=measured_weight_g,
             from_status_id=from_status_id,
@@ -363,9 +365,23 @@ class SpoolService:
         principal: Principal | None = None,
         source: str = "ui",
         note: str | None = None,
+        source_event_key: str | None = None,
     ) -> tuple[SpoolEvent, float | None]:
         if delta_weight_g > 0:
             delta_weight_g = -delta_weight_g
+
+        # External producers can replay a completion event after reconnect or
+        # restart.  Resolve the stable key before aggregation so a replay is a
+        # strict no-op and never changes the spool twice.
+        if source_event_key:
+            result = await self.db.execute(
+                select(SpoolEvent).where(
+                    SpoolEvent.source_event_key == source_event_key
+                )
+            )
+            existing_by_key = result.scalar_one_or_none()
+            if existing_by_key is not None:
+                return existing_by_key, spool.remaining_weight_g
 
         # Check if we can aggregate with a recent event
         existing_event = await self._get_aggregatable_consumption_event(
@@ -426,6 +442,7 @@ class SpoolService:
                 delta_weight_g=delta_weight_g,
                 note=note,
                 meta=meta if meta else None,
+                source_event_key=source_event_key,
             )
             await self.db.commit()
             return event, None
@@ -448,6 +465,7 @@ class SpoolService:
             delta_weight_g=delta_weight_g,
             note=note,
             meta=meta if meta else None,
+            source_event_key=source_event_key,
         )
 
         spool.remaining_weight_g = remaining
@@ -681,3 +699,4 @@ class SpoolService:
 
         await self.db.commit()
         return remaining
+
