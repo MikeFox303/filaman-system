@@ -116,6 +116,7 @@ class TestPrimaryWorkerProxy:
         assert method == "POST"
         assert url == "http://127.0.0.1:8000/api/v1/printers/3/driver/action"
         assert client.request.await_args.kwargs["params"] is None
+        assert client.request.await_args.kwargs["json"] == {"action": "assign_spool"}
         assert client.request.await_args.kwargs["headers"] == {
             "authorization": "Bearer token",
             "cookie": "session=abc",
@@ -184,15 +185,17 @@ class TestPrimaryWorkerProxy:
             headers={"x-filaman-primary-hop": str(printers_api._PRIMARY_PROXY_MAX_HOPS)}
         )
 
-        with pytest.raises(HTTPException) as exc_info:
-            await printers_api._proxy_to_primary(
-                request,
-                method="POST",
-                path="/api/v1/printers/3/driver/action",
-            )
+        with patch("app.api.v1.printers.httpx.AsyncClient") as async_client:
+            with pytest.raises(HTTPException) as exc_info:
+                await printers_api._proxy_to_primary(
+                    request,
+                    method="POST",
+                    path="/api/v1/printers/3/driver/action",
+                )
 
         assert exc_info.value.status_code == 503
         assert exc_info.value.detail["code"] == "primary_proxy_failed"
+        async_client.assert_not_called()
 
 
 class TestPrinterCRUD:
