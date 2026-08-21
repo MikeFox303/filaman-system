@@ -12,8 +12,8 @@ from app.services.managed_plugin_service import (
 
 
 def test_version_tuple():
-    assert _version_tuple("1.3.8") == (1, 3, 8)
-    assert _version_tuple("1.3.8-rc1") == (1, 3, 8)
+    assert _version_tuple("1.3.9") == (1, 3, 9)
+    assert _version_tuple("1.3.9-rc1") == (1, 3, 9)
     assert _version_tuple("broken") is None
 
 
