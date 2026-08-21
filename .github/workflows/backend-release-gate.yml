@@ -2,8 +2,15 @@ name: Backend Release Gate
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-release-gate.yml"
   push:
     branches:
+      - main
       - feat/consumption-protocol
     paths:
       - "backend/**"
@@ -11,6 +18,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: backend-release-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend-tests:
