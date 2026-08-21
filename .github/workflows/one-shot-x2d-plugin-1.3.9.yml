@@ -1,6 +1,7 @@
 name: One-shot X2D plugin 1.3.9 packaging
 
 on:
+  workflow_call:
   push:
     branches: [release/x2d-plugin-1.3.9]
     paths:
@@ -34,7 +35,6 @@ jobs:
           from pathlib import Path
           import hashlib
           import json
-          import re
           import zipfile
 
           root = Path.cwd()
@@ -50,8 +50,6 @@ jobs:
           if new_asset.exists():
               new_asset.unlink()
 
-          # Deterministic ZIP: stable ordering/timestamps and the plugin's required
-          # top-level bambuddy/ directory.
           fixed = (2026, 8, 21, 0, 0, 0)
           with zipfile.ZipFile(new_asset, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
               for source in sorted(p for p in plugin_root.rglob('*') if p.is_file()):
@@ -100,8 +98,7 @@ jobs:
           service_path.write_text(service, encoding='utf-8')
 
           test_path = root / 'backend' / 'tests' / 'test_managed_plugin_service.py'
-          test_text = test_path.read_text(encoding='utf-8').replace('1.3.8', '1.3.9')
-          test_path.write_text(test_text, encoding='utf-8')
+          test_path.write_text(test_path.read_text(encoding='utf-8').replace('1.3.8', '1.3.9'), encoding='utf-8')
 
           helper_path = root / 'frontend' / 'src' / 'lib' / 'driver-action-label.ts'
           helper_path.write_text('''export function driverSyncActionLabel(action: any, lang: string): string {\n  const localized = action?.labelByLocale?.[lang]\n  if (typeof localized === 'string' && localized.trim()) return localized\n  if (lang === 'de' && typeof action?.label_de === 'string' && action.label_de.trim()) return action.label_de\n  return typeof action?.label === 'string' ? action.label : ''\n}\n''', encoding='utf-8')
