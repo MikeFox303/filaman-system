@@ -87,7 +87,7 @@ import Layout from '../../layouts/Layout.astro'
   <script>
     import { t, initI18n, getLang } from '../../lib/i18n'
     import { getAbortSignal, isAbortError } from '../../lib/abort'
-    import { buildDriverConfigPayload, enumLabels, isStructuredProp } from '../../lib/driver-config-form'
+    import { buildDriverConfigPayload, enumLabels, isStructuredProp, schemaDescription, schemaTitle } from '../../lib/driver-config-form'
     await initI18n()
 
     let printers: any[] = []
@@ -401,7 +401,7 @@ import Layout from '../../layouts/Layout.astro'
         const label = document.createElement('label')
         label.className = 'fm-label'
         label.setAttribute('for', `config-${key}`)
-        label.textContent = (prop.title || key) + (required.includes(key) ? ' *' : '')
+        label.textContent = schemaTitle(prop, getLang(), key) + (required.includes(key) ? ' *' : '')
         div.appendChild(label)
         
         const currentValue = existingConfig ? existingConfig[key] : undefined
@@ -419,10 +419,11 @@ import Layout from '../../layouts/Layout.astro'
           note.textContent = t('printers.configReadOnly')
           div.appendChild(note)
 
-          if (prop.description) {
+          const structuredDescription = schemaDescription(prop, getLang())
+          if (structuredDescription) {
             const hint = document.createElement('div')
             hint.style.cssText = 'font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;'
-            hint.textContent = prop.description
+            hint.textContent = structuredDescription
             div.appendChild(hint)
           }
 
@@ -482,10 +483,11 @@ import Layout from '../../layouts/Layout.astro'
           div.appendChild(input)
         }
         
-        if (prop.description) {
+        const description = schemaDescription(prop, getLang())
+        if (description) {
           const hint = document.createElement('div')
           hint.style.cssText = 'font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;'
-          hint.textContent = prop.description
+          hint.textContent = description
           div.appendChild(hint)
         }
         

@@ -21,7 +21,9 @@
 export interface SchemaProperty {
   type?: string
   title?: string
+  titleByLocale?: Record<string, string>
   description?: string
+  descriptionByLocale?: Record<string, string>
   default?: unknown
   enum?: unknown[]
   enumNames?: string[]
@@ -30,8 +32,40 @@ export interface SchemaProperty {
   maximum?: number
 }
 
+/**
+ * Resolve a localized schema value while keeping legacy plugins compatible.
+ *
+ * Browsers/i18n libraries may expose either a base language ("ru") or a locale
+ * ("ru-RU"). Plugin schemas normally use base-language keys, so try the exact
+ * key first and then the base part before falling back to the legacy field.
+ */
+function localizedSchemaValue(
+  values: Record<string, string> | undefined,
+  lang: string,
+): string | undefined {
+  if (!values) return undefined
+  const normalized = (lang || '').replace('_', '-').toLowerCase()
+  if (values[lang]) return values[lang]
+  if (values[normalized]) return values[normalized]
+  const base = normalized.split('-')[0]
+  if (base && values[base]) return values[base]
+  return undefined
+}
+
+export function schemaTitle(prop: SchemaProperty, lang: string, fallback = ''): string {
+  return localizedSchemaValue(prop.titleByLocale, lang) || prop.title || fallback
+}
+
+export function schemaDescription(prop: SchemaProperty, lang: string): string {
+  return localizedSchemaValue(prop.descriptionByLocale, lang) || prop.description || ''
+}
+
 export function enumLabels(prop: SchemaProperty, lang: string): string[] {
+  const normalized = (lang || '').replace('_', '-').toLowerCase()
+  const base = normalized.split('-')[0]
   return prop.enumNamesByLocale?.[lang]
+    || prop.enumNamesByLocale?.[normalized]
+    || (base ? prop.enumNamesByLocale?.[base] : undefined)
     || prop.enumNames
     || (prop.enum || []).map(String)
 }
