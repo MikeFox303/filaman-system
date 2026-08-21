@@ -1,0 +1,479 @@
+from pathlib import Path
+import json
+
+
+def patch_plugin_installer() -> None:
+    service_path = Path("backend/app/services/plugin_service.py")
+    text = service_path.read_text()
+    if "from uuid import uuid4\n" not in text:
+        text = text.replace(
+            "from typing import Any, Callable\n",
+            "from typing import Any, Callable\nfrom uuid import uuid4\n",
+            1,
+        )
+    start = text.index("            # 8. Upgrade oder Neuinstallation pruefen\n")
+    end = text.index(
+        "    # ------------------------------------------------------------------ #\n    #  Deinstallation\n",
+        start,
+    )
+    block = '''            # 8. Upgrade oder Neuinstallation pruefen
+            plugin_key = manifest["plugin_key"]
+            existing = await self._find_existing(plugin_key)
+            is_upgrade = existing is not None
+
+            # Prepare on the same persistent filesystem so promotion/rollback
+            # uses atomic renames and preparation never destroys the live plugin.
+            PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
+            target_dir = PLUGINS_DIR / plugin_key
+            staging_dir = Path(
+                tempfile.mkdtemp(prefix=f".{plugin_key}.staging-", dir=PLUGINS_DIR)
+            )
+            backup_dir = PLUGINS_DIR / f".{plugin_key}.backup-{uuid4().hex}"
+            backup_created = False
+            swapped = False
+
+            try:
+                shutil.copytree(plugin_dir, staging_dir, dirs_exist_ok=True)
+                dependencies = manifest.get("dependencies", [])
+                if dependencies:
+                    await self._install_dependencies(dependencies, plugin_key)
+
+                if is_upgrade and stop_callback:
+                    await stop_callback(existing.driver_key or plugin_key)
+
+                if target_dir.exists():
+                    target_dir.rename(backup_dir)
+                    backup_created = True
+                try:
+                    staging_dir.rename(target_dir)
+                    swapped = True
+                except Exception:
+                    if backup_created and backup_dir.exists() and not target_dir.exists():
+                        backup_dir.rename(target_dir)
+                        backup_created = False
+                    raise
+
+                if existing:
+                    existing.name = manifest["name"]
+                    existing.version = manifest["version"]
+                    existing.description = manifest.get("description")
+                    existing.author = manifest.get("author")
+                    existing.homepage = manifest.get("homepage")
+                    existing.license = manifest.get("license")
+                    existing.plugin_type = plugin_type
+                    existing.driver_key = manifest.get("driver_key")
+                    existing.page_url = manifest.get("page_url")
+                    existing.config_schema = manifest.get("config_schema")
+                    existing.capabilities = manifest.get("capabilities")
+                    existing.show_in_nav = manifest.get("show_in_nav", False)
+                    plugin = existing
+                else:
+                    plugin = InstalledPlugin(
+                        plugin_key=plugin_key,
+                        name=manifest["name"],
+                        version=manifest["version"],
+                        description=manifest.get("description"),
+                        author=manifest.get("author"),
+                        homepage=manifest.get("homepage"),
+                        license=manifest.get("license"),
+                        plugin_type=plugin_type,
+                        driver_key=manifest.get("driver_key"),
+                        page_url=manifest.get("page_url"),
+                        config_schema=manifest.get("config_schema"),
+                        capabilities=manifest.get("capabilities"),
+                        show_in_nav=manifest.get("show_in_nav", False),
+                        is_active=True,
+                        installed_by=installed_by,
+                    )
+                    self.db.add(plugin)
+
+                try:
+                    await self.db.commit()
+                except Exception:
+                    await self.db.rollback()
+                    if swapped and target_dir.exists():
+                        shutil.rmtree(target_dir)
+                    if backup_created and backup_dir.exists():
+                        backup_dir.rename(target_dir)
+                        backup_created = False
+                    raise
+
+                try:
+                    await self.db.refresh(plugin)
+                except Exception:
+                    logger.exception(
+                        "Plugin '%s' committed but DB refresh failed; keeping committed upgrade",
+                        plugin_key,
+                    )
+
+                if backup_created and backup_dir.exists():
+                    try:
+                        shutil.rmtree(backup_dir)
+                    except OSError:
+                        logger.exception(
+                            "Plugin '%s' upgraded but rollback directory cleanup failed: %s",
+                            plugin_key,
+                            backup_dir,
+                        )
+                    backup_created = False
+
+                action = "aktualisiert" if is_upgrade else "installiert"
+                logger.info(
+                    "Plugin '%s' v%s erfolgreich %s",
+                    plugin_key,
+                    manifest["version"],
+                    action,
+                )
+                return plugin, is_upgrade
+            finally:
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir)
+
+'''
+    service_path.write_text(text[:start] + block + text[end:])
+
+    tests_path = Path("backend/tests/test_plugin_service.py")
+    tests = tests_path.read_text()
+    if "from unittest.mock import AsyncMock, patch\n" not in tests:
+        tests = tests.replace(
+            "from unittest.mock import patch\n",
+            "from unittest.mock import AsyncMock, patch\n",
+            1,
+        )
+    if "class TestAtomicPluginUpgrade:" not in tests:
+        tests += r'''
+
+class TestAtomicPluginUpgrade:
+    @staticmethod
+    def _versioned_zip(version: str, *, dependencies=None, marker: str = "v1") -> bytes:
+        manifest = {**VALID_MANIFEST, "version": version}
+        if dependencies is not None:
+            manifest["dependencies"] = dependencies
+        return _make_zip({
+            "plugin.json": json.dumps(manifest),
+            "driver.py": VALID_DRIVER_PY + f"\nMARKER = {marker!r}\n",
+            "__init__.py": VALID_INIT_PY,
+        })
+
+    @pytest.mark.asyncio
+    async def test_dependency_failure_preserves_old_plugin_and_db_version(self, db_session):
+        service = PluginInstallService(db_session)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugins_dir = Path(tmpdir)
+            with patch("app.services.plugin_service.PLUGINS_DIR", plugins_dir):
+                await service.install_from_zip(
+                    self._versioned_zip("1.0.0", marker="old"), installed_by=1
+                )
+                old_manifest = (plugins_dir / "test_plugin" / "plugin.json").read_text()
+                stop_callback = AsyncMock()
+                service._install_dependencies = AsyncMock(
+                    side_effect=PluginInstallError(
+                        "dependency failed", "dependency_install_failed"
+                    )
+                )
+                with pytest.raises(PluginInstallError) as excinfo:
+                    await service.install_from_zip(
+                        self._versioned_zip(
+                            "2.0.0",
+                            dependencies=["definitely-not-installed"],
+                            marker="new",
+                        ),
+                        installed_by=1,
+                        stop_callback=stop_callback,
+                    )
+                assert excinfo.value.code == "dependency_install_failed"
+                stop_callback.assert_not_awaited()
+                assert (plugins_dir / "test_plugin" / "plugin.json").read_text() == old_manifest
+                installed = await service.get_plugin("test_plugin")
+                assert installed is not None and installed.version == "1.0.0"
+                assert not list(plugins_dir.glob(".test_plugin.backup-*"))
+                assert not list(plugins_dir.glob(".test_plugin.staging-*"))
+
+    @pytest.mark.asyncio
+    async def test_db_commit_failure_restores_old_plugin_directory(self, db_session):
+        service = PluginInstallService(db_session)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugins_dir = Path(tmpdir)
+            with patch("app.services.plugin_service.PLUGINS_DIR", plugins_dir):
+                await service.install_from_zip(
+                    self._versioned_zip("1.0.0", marker="old"), installed_by=1
+                )
+                old_driver = (plugins_dir / "test_plugin" / "driver.py").read_text()
+                real_commit = db_session.commit
+                db_session.commit = AsyncMock(side_effect=RuntimeError("db commit failed"))
+                try:
+                    with pytest.raises(RuntimeError, match="db commit failed"):
+                        await service.install_from_zip(
+                            self._versioned_zip("2.0.0", marker="new"), installed_by=1
+                        )
+                finally:
+                    db_session.commit = real_commit
+                assert (plugins_dir / "test_plugin" / "driver.py").read_text() == old_driver
+                installed = await service.get_plugin("test_plugin")
+                assert installed is not None and installed.version == "1.0.0"
+                assert not list(plugins_dir.glob(".test_plugin.backup-*"))
+                assert not list(plugins_dir.glob(".test_plugin.staging-*"))
+
+    @pytest.mark.asyncio
+    async def test_successful_upgrade_replaces_files_and_cleans_rollback_dirs(self, db_session):
+        service = PluginInstallService(db_session)
+        stop_callback = AsyncMock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugins_dir = Path(tmpdir)
+            with patch("app.services.plugin_service.PLUGINS_DIR", plugins_dir):
+                await service.install_from_zip(
+                    self._versioned_zip("1.0.0", marker="old"), installed_by=1
+                )
+                plugin, is_upgrade = await service.install_from_zip(
+                    self._versioned_zip("2.0.0", marker="new"),
+                    installed_by=1,
+                    stop_callback=stop_callback,
+                )
+                assert is_upgrade is True and plugin.version == "2.0.0"
+                assert "MARKER = 'new'" in (
+                    plugins_dir / "test_plugin" / "driver.py"
+                ).read_text()
+                stop_callback.assert_awaited_once_with("test_plugin")
+                assert not list(plugins_dir.glob(".test_plugin.backup-*"))
+                assert not list(plugins_dir.glob(".test_plugin.staging-*"))
+'''
+    tests_path.write_text(tests)
+
+
+def add_managed_plugin_bootstrap() -> None:
+    Path("backend/app/services/managed_plugin_service.py").write_text(r'''"""Install release-managed plugins before printer drivers start."""
+
+import hashlib
+import logging
+from pathlib import Path
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.services import plugin_service
+from app.services.plugin_service import PluginInstallService
+
+logger = logging.getLogger(__name__)
+
+BAMBUDDY_PLUGIN_KEY = "bambuddy"
+BAMBUDDY_PLUGIN_VERSION = "1.3.8"
+BAMBUDDY_PLUGIN_SHA256 = "a41f6bd38f9ebce1f21b620f9ce7ea8ab3984fc2a633cffe18e33518e906d508"
+BAMBUDDY_PLUGIN_ASSET = Path("/app/managed_plugins/bambuddy-1.3.8.zip")
+
+
+def _version_tuple(value: str) -> tuple[int, int, int] | None:
+    try:
+        core = value.split("-", 1)[0]
+        parts = tuple(int(part) for part in core.split("."))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return parts if len(parts) == 3 else None
+
+
+def _read_verified_asset(path: Path, expected_sha256: str) -> bytes:
+    data = path.read_bytes()
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected_sha256:
+        raise RuntimeError(
+            f"Managed plugin checksum mismatch for {path.name}: expected {expected_sha256}, got {actual}"
+        )
+    return data
+
+
+async def ensure_managed_plugins(db: AsyncSession) -> None:
+    service = PluginInstallService(db)
+    existing = await service.get_plugin(BAMBUDDY_PLUGIN_KEY)
+    desired = _version_tuple(BAMBUDDY_PLUGIN_VERSION)
+    current = _version_tuple(existing.version) if existing else None
+    target_dir = plugin_service.PLUGINS_DIR / BAMBUDDY_PLUGIN_KEY
+
+    if existing and current and desired and current > desired:
+        logger.warning(
+            "Managed Bambuddy plugin v%s is older than installed v%s; refusing downgrade",
+            BAMBUDDY_PLUGIN_VERSION,
+            existing.version,
+        )
+        return
+
+    if (
+        existing
+        and existing.version == BAMBUDDY_PLUGIN_VERSION
+        and target_dir.is_dir()
+        and (target_dir / "plugin.json").is_file()
+    ):
+        logger.info(
+            "Managed Bambuddy plugin v%s already installed", BAMBUDDY_PLUGIN_VERSION
+        )
+        return
+
+    data = _read_verified_asset(BAMBUDDY_PLUGIN_ASSET, BAMBUDDY_PLUGIN_SHA256)
+    plugin, is_upgrade = await service.install_from_zip(
+        data, installed_by=None, stop_callback=None
+    )
+    if plugin.plugin_key != BAMBUDDY_PLUGIN_KEY or plugin.version != BAMBUDDY_PLUGIN_VERSION:
+        raise RuntimeError(
+            f"Managed Bambuddy plugin identity mismatch: {plugin.plugin_key} v{plugin.version}"
+        )
+    logger.info(
+        "Managed Bambuddy plugin %s to v%s",
+        "upgraded" if is_upgrade else "installed",
+        BAMBUDDY_PLUGIN_VERSION,
+    )
+''')
+
+    Path("backend/tests/test_managed_plugin_service.py").write_text(r'''from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from app.services.managed_plugin_service import (
+    BAMBUDDY_PLUGIN_KEY,
+    BAMBUDDY_PLUGIN_VERSION,
+    _read_verified_asset,
+    _version_tuple,
+    ensure_managed_plugins,
+)
+
+
+def test_version_tuple():
+    assert _version_tuple("1.3.8") == (1, 3, 8)
+    assert _version_tuple("1.3.8-rc1") == (1, 3, 8)
+    assert _version_tuple("broken") is None
+
+
+def test_checksum_mismatch_fails_closed(tmp_path):
+    asset = tmp_path / "plugin.zip"
+    asset.write_bytes(b"wrong")
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        _read_verified_asset(asset, "0" * 64)
+
+
+@pytest.mark.asyncio
+async def test_exact_version_is_noop_when_files_exist(db_session, tmp_path):
+    target = tmp_path / BAMBUDDY_PLUGIN_KEY
+    target.mkdir()
+    (target / "plugin.json").write_text("{}")
+    existing = type("Plugin", (), {"version": BAMBUDDY_PLUGIN_VERSION})()
+    with patch(
+        "app.services.managed_plugin_service.plugin_service.PLUGINS_DIR", tmp_path
+    ), patch(
+        "app.services.managed_plugin_service.PluginInstallService.get_plugin",
+        AsyncMock(return_value=existing),
+    ), patch(
+        "app.services.managed_plugin_service.PluginInstallService.install_from_zip",
+        AsyncMock(),
+    ) as install:
+        await ensure_managed_plugins(db_session)
+        install.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_newer_version_is_not_downgraded(db_session, tmp_path):
+    existing = type("Plugin", (), {"version": "9.0.0"})()
+    with patch(
+        "app.services.managed_plugin_service.plugin_service.PLUGINS_DIR", tmp_path
+    ), patch(
+        "app.services.managed_plugin_service.PluginInstallService.get_plugin",
+        AsyncMock(return_value=existing),
+    ), patch(
+        "app.services.managed_plugin_service.PluginInstallService.install_from_zip",
+        AsyncMock(),
+    ) as install:
+        await ensure_managed_plugins(db_session)
+        install.assert_not_awaited()
+''')
+
+    main_path = Path("backend/app/main.py")
+    main = main_path.read_text()
+    import_line = "from app.services.plugin_service import PLUGINS_DIR\n"
+    managed_import = (
+        "from app.services.managed_plugin_service import ensure_managed_plugins\n"
+    )
+    if managed_import not in main:
+        main = main.replace(import_line, import_line + managed_import, 1)
+    old = '''    if _is_primary:\n        async with async_session_maker() as db:\n            await run_all_seeds(db)\n        await plugin_manager.start_all()\n'''
+    new = '''    if _is_primary:\n        async with async_session_maker() as db:\n            await run_all_seeds(db)\n            await ensure_managed_plugins(db)\n        await plugin_manager.start_all()\n'''
+    if old not in main:
+        raise RuntimeError("startup insertion point changed")
+    main_path.write_text(main.replace(old, new, 1))
+
+    dockerfile = Path("Dockerfile")
+    docker = dockerfile.read_text()
+    marker = "COPY --from=backend-builder /app/backend /app\n"
+    if "COPY backend/managed_plugins /app/managed_plugins" not in docker:
+        docker = docker.replace(
+            marker,
+            marker
+            + "\n# Checksum-pinned release-managed plugin artifacts\n"
+            + "COPY backend/managed_plugins /app/managed_plugins\n",
+            1,
+        )
+    dockerfile.write_text(docker)
+
+
+def polish_translations() -> None:
+    fixes = {
+        "frontend/src/i18n/ru.json": {
+            ("theme", "light"): "Светлая",
+            ("theme", "dark"): "Тёмная",
+            ("common", "submit"): "Отправить",
+            ("common", "on"): "Включено",
+            ("common", "off"): "Выключено",
+            ("rfid", "writeTag"): "Записать RFID-метку",
+            ("rfid", "writeSuccessWithCleanup"): "RFID-метка успешно записана и удалена из {source}.",
+            ("filaments", "newFilament"): "Новый филамент",
+            ("filaments", "backToFilaments"): "Вернуться к филаментам",
+            ("filaments", "notFound"): "Филамент не найден",
+            ("filaments", "noResults"): "Ни один филамент не соответствует текущим фильтрам.",
+            ("filaments", "colMfrColor"): "Цвет производителя",
+            ("filaments", "colFinish"): "Поверхность",
+            ("spools", "remaining"): "Остаток",
+            ("spools", "permanentDeleteWarning"): "Эта катушка будет окончательно удалена из базы данных и больше не будет учитываться в статистике.",
+            ("spools", "recordWeight"): "Записать вес",
+            ("spools", "adjust"): "Скорректировать",
+            ("spools", "move"): "Переместить",
+            ("spools", "dsPresetsLoad"): "Загрузить",
+            ("spools", "dsModifierBold"): "Жирный",
+            ("printers", "slotOccupied"): "Занят",
+            ("printers", "incoming"): "ВХ",
+            ("printers", "outgoing"): "ИСХ",
+        },
+        "frontend/src/i18n/uk.json": {
+            ("common", "save"): "Зберегти",
+            ("common", "yes"): "Так",
+            ("common", "no"): "Ні",
+            ("common", "add"): "Додати",
+            ("common", "open"): "Відкрити",
+            ("common", "systemField"): "Система",
+            ("common", "duplicate"): "Дублювати",
+            ("rfid", "writeTag"): "Записати RFID-мітку",
+            ("rfid", "selectDevice"): "Виберіть пристрій",
+            ("login", "title"): "Вхід — FilaMan",
+            ("login", "signIn"): "Увійти",
+            ("settings", "langEn"): "English",
+            ("filaments", "newFilament"): "Новий філамент",
+            ("filaments", "createFilament"): "Створити філамент",
+            ("filaments", "noResults"): "Жоден філамент не відповідає поточним фільтрам.",
+            ("filaments", "colMfrColor"): "Колір виробника",
+            ("filaments", "colFinish"): "Поверхня",
+            ("spools", "remaining"): "Залишок",
+            ("spools", "recordWeight"): "Записати вагу",
+            ("spools", "move"): "Перемістити",
+            ("spools", "dsPresetsLoad"): "Завантажити",
+            ("spools", "dsModifierBold"): "Жирний",
+            ("printers", "driver"): "Драйвер",
+            ("printers", "slotOccupied"): "Зайнятий",
+        },
+    }
+    for filename, mapping in fixes.items():
+        path = Path(filename)
+        data = json.loads(path.read_text())
+        for (section, key), value in mapping.items():
+            if section not in data or key not in data[section]:
+                raise RuntimeError(f"missing translation key {filename}:{section}.{key}")
+            data[section][key] = value
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    patch_plugin_installer()
+    add_managed_plugin_bootstrap()
+    polish_translations()
