@@ -1,0 +1,173 @@
+name: One-shot X2D plugin 1.3.9 packaging
+
+on:
+  push:
+    branches: [release/x2d-plugin-1.3.9]
+    paths:
+      - .github/workflows/one-shot-x2d-plugin-1.3.9.yml
+
+permissions:
+  contents: write
+
+jobs:
+  package-test-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout FilaMan release branch
+        uses: actions/checkout@v4
+        with:
+          ref: release/x2d-plugin-1.3.9
+          fetch-depth: 0
+
+      - name: Checkout validated Bambuddy plugin 1.3.9
+        uses: actions/checkout@v4
+        with:
+          repository: MikeFox303/filaman-bambuddy-plugin
+          ref: 58ed50df6a3d982f8efc90d09e9af8993c482b27
+          path: plugin-src
+
+      - name: Package plugin and apply release patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import re
+          import zipfile
+
+          root = Path.cwd()
+          plugin_root = root / 'plugin-src' / 'bambuddy'
+          manifest = json.loads((plugin_root / 'plugin.json').read_text(encoding='utf-8'))
+          if manifest.get('plugin_key') != 'bambuddy' or manifest.get('version') != '1.3.9':
+              raise SystemExit(f"unexpected plugin identity: {manifest.get('plugin_key')} {manifest.get('version')}")
+
+          managed_dir = root / 'backend' / 'managed_plugins'
+          managed_dir.mkdir(parents=True, exist_ok=True)
+          old_asset = managed_dir / 'bambuddy-1.3.8.zip'
+          new_asset = managed_dir / 'bambuddy-1.3.9.zip'
+          if new_asset.exists():
+              new_asset.unlink()
+
+          # Deterministic ZIP: stable ordering/timestamps and the plugin's required
+          # top-level bambuddy/ directory.
+          fixed = (2026, 8, 21, 0, 0, 0)
+          with zipfile.ZipFile(new_asset, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+              for source in sorted(p for p in plugin_root.rglob('*') if p.is_file()):
+                  rel = source.relative_to(plugin_root)
+                  if '__pycache__' in rel.parts or source.suffix in {'.pyc', '.pyo'}:
+                      continue
+                  arcname = (Path('bambuddy') / rel).as_posix()
+                  info = zipfile.ZipInfo(arcname, fixed)
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.external_attr = 0o100644 << 16
+                  zf.writestr(info, source.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+
+          with zipfile.ZipFile(new_asset, 'r') as zf:
+              names = zf.namelist()
+              if not names or not all(name.startswith('bambuddy/') for name in names):
+                  raise SystemExit('managed plugin ZIP has invalid root layout')
+              packed_manifest = json.loads(zf.read('bambuddy/plugin.json'))
+              if packed_manifest.get('version') != '1.3.9':
+                  raise SystemExit('packed plugin version mismatch')
+              required = {
+                  'bambuddy/__init__.py',
+                  'bambuddy/driver.py',
+                  'bambuddy/external_slots.py',
+                  'bambuddy/profile_variants.py',
+                  'bambuddy/plugin.json',
+                  'bambuddy/bambu_filaments.json',
+              }
+              missing = required - set(names)
+              if missing:
+                  raise SystemExit(f'managed plugin ZIP missing: {sorted(missing)}')
+
+          sha256 = hashlib.sha256(new_asset.read_bytes()).hexdigest()
+          print(f'bambuddy-1.3.9.zip sha256={sha256}')
+
+          service_path = root / 'backend' / 'app' / 'services' / 'managed_plugin_service.py'
+          service = service_path.read_text(encoding='utf-8')
+          replacements = {
+              'BAMBUDDY_PLUGIN_VERSION = "1.3.8"': 'BAMBUDDY_PLUGIN_VERSION = "1.3.9"',
+              'BAMBUDDY_PLUGIN_SHA256 = "a41f6bd38f9ebce1f21b620f9ce7ea8ab3984fc2a633cffe18e33518e906d508"': f'BAMBUDDY_PLUGIN_SHA256 = "{sha256}"',
+              'BAMBUDDY_PLUGIN_ASSET = Path("/app/managed_plugins/bambuddy-1.3.8.zip")': 'BAMBUDDY_PLUGIN_ASSET = Path("/app/managed_plugins/bambuddy-1.3.9.zip")',
+          }
+          for old, new in replacements.items():
+              if service.count(old) != 1:
+                  raise SystemExit(f'expected exactly one managed-plugin marker: {old}')
+              service = service.replace(old, new, 1)
+          service_path.write_text(service, encoding='utf-8')
+
+          test_path = root / 'backend' / 'tests' / 'test_managed_plugin_service.py'
+          test_text = test_path.read_text(encoding='utf-8').replace('1.3.8', '1.3.9')
+          test_path.write_text(test_text, encoding='utf-8')
+
+          helper_path = root / 'frontend' / 'src' / 'lib' / 'driver-action-label.ts'
+          helper_path.write_text('''export function driverSyncActionLabel(action: any, lang: string): string {\n  const localized = action?.labelByLocale?.[lang]\n  if (typeof localized === 'string' && localized.trim()) return localized\n  if (lang === 'de' && typeof action?.label_de === 'string' && action.label_de.trim()) return action.label_de\n  return typeof action?.label === 'string' ? action.label : ''\n}\n''', encoding='utf-8')
+
+          helper_test_path = root / 'frontend' / 'src' / 'lib' / 'driver-action-label.test.ts'
+          helper_test_path.write_text('''import { describe, expect, it } from 'vitest'\nimport { driverSyncActionLabel } from './driver-action-label'\n\ndescribe('driverSyncActionLabel', () => {\n  const action = {\n    label: 'Sync Now',\n    label_de: 'Jetzt synchronisieren',\n    labelByLocale: { ru: 'Синхронизировать', uk: 'Синхронізувати' },\n  }\n\n  it('uses the requested localized plugin label', () => {\n    expect(driverSyncActionLabel(action, 'ru')).toBe('Синхронизировать')\n    expect(driverSyncActionLabel(action, 'uk')).toBe('Синхронізувати')\n  })\n\n  it('keeps the legacy German fallback', () => {\n    expect(driverSyncActionLabel(action, 'de')).toBe('Jetzt synchronisieren')\n  })\n\n  it('falls back to the default label', () => {\n    expect(driverSyncActionLabel(action, 'en')).toBe('Sync Now')\n    expect(driverSyncActionLabel({ label: 'Full Resync' }, 'ru')).toBe('Full Resync')\n  })\n})\n''', encoding='utf-8')
+
+          page_path = root / 'frontend' / 'src' / 'pages' / 'printers' / '[id].astro'
+          page = page_path.read_text(encoding='utf-8')
+          import_marker = "    import { buildDriverConfigPayload, enumLabels, isStructuredProp, schemaDescription, schemaTitle } from '../../lib/driver-config-form'\n"
+          import_replacement = import_marker + "    import { driverSyncActionLabel } from '../../lib/driver-action-label'\n"
+          if page.count(import_marker) != 1:
+              raise SystemExit('printer page import marker changed')
+          page = page.replace(import_marker, import_replacement, 1)
+          old_label = "                  const label = getLang() === 'de' ? (a.label_de || a.label) : a.label"
+          new_label = "                  const label = driverSyncActionLabel(a, getLang())"
+          if page.count(old_label) != 1:
+              raise SystemExit('printer sync-action label expression changed')
+          page = page.replace(old_label, new_label, 1)
+          page_path.write_text(page, encoding='utf-8')
+
+          if old_asset.exists():
+              old_asset.unlink()
+          PY
+
+      - name: Set up backend dependencies
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Validate managed plugin and consumption/migration core
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          uv sync --frozen --extra dev
+          uv run pytest tests/test_managed_plugin_service.py tests/test_spool_service.py tests/test_x2d_external_slot_migration.py -q
+          HEAD_COUNT="$(uv run alembic heads | grep -E '^[0-9a-zA-Z_]+ ' | wc -l)"
+          test "$HEAD_COUNT" -eq 1
+          MIGRATION_DB="$RUNNER_TEMP/x2d_release.db"
+          DATABASE_URL="sqlite+aiosqlite:///$MIGRATION_DB" uv run alembic upgrade head
+
+      - name: Validate frontend
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          npm ci
+          npm test -- --run
+          npm run check:i18n
+          npm run check
+          npm run build
+
+      - name: Commit validated release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf plugin-src
+          rm .github/workflows/one-shot-x2d-plugin-1.3.9.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A backend/managed_plugins \
+            backend/app/services/managed_plugin_service.py \
+            backend/tests/test_managed_plugin_service.py \
+            frontend/src/lib/driver-action-label.ts \
+            frontend/src/lib/driver-action-label.test.ts \
+            'frontend/src/pages/printers/[id].astro' \
+            .github/workflows/one-shot-x2d-plugin-1.3.9.yml
+          git diff --cached --check
+          git commit -m 'release: bundle Bambuddy 1.3.9 for X2D'
+          git push origin HEAD:release/x2d-plugin-1.3.9
