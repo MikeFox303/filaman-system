@@ -4,8 +4,47 @@ import {
   buildDriverConfigPayload,
   enumLabels,
   isStructuredProp,
+  schemaDescription,
+  schemaTitle,
   type SchemaProperty,
 } from './driver-config-form'
+
+describe('localized schema fields', () => {
+  const prop: SchemaProperty = {
+    title: 'Printer Write Mode',
+    titleByLocale: {
+      ru: 'Режим записи в принтер',
+      uk: 'Режим запису в принтер',
+    },
+    description: 'Controls whether material settings are written to the printer.',
+    descriptionByLocale: {
+      ru: 'Определяет, будут ли настройки материала записываться в принтер.',
+      uk: 'Визначає, чи записуватимуться налаштування матеріалу в принтер.',
+    },
+  }
+
+  it('uses a localized title and description when available', () => {
+    expect(schemaTitle(prop, 'ru', 'printer_write_mode')).toBe('Режим записи в принтер')
+    expect(schemaDescription(prop, 'ru')).toBe(
+      'Определяет, будут ли настройки материала записываться в принтер.'
+    )
+  })
+
+  it('accepts region locales by falling back to the base language', () => {
+    expect(schemaTitle(prop, 'ru-RU', 'printer_write_mode')).toBe('Режим записи в принтер')
+    expect(schemaDescription(prop, 'uk-UA')).toBe(
+      'Визначає, чи записуватимуться налаштування матеріалу в принтер.'
+    )
+  })
+
+  it('keeps legacy schemas working when a locale is missing', () => {
+    expect(schemaTitle(prop, 'de', 'printer_write_mode')).toBe('Printer Write Mode')
+    expect(schemaDescription(prop, 'de')).toBe(
+      'Controls whether material settings are written to the printer.'
+    )
+    expect(schemaTitle({}, 'ru', 'printer_write_mode')).toBe('printer_write_mode')
+  })
+})
 
 describe('enumLabels', () => {
   it('prefers localized labels and falls back to legacy enumNames', () => {
@@ -15,6 +54,7 @@ describe('enumLabels', () => {
       enumNamesByLocale: { ru: ['Полный режим', 'Только инвентарь'] },
     }
     expect(enumLabels(prop, 'ru')).toEqual(['Полный режим', 'Только инвентарь'])
+    expect(enumLabels(prop, 'ru-RU')).toEqual(['Полный режим', 'Только инвентарь'])
     expect(enumLabels(prop, 'uk')).toEqual(['Full', 'Inventory only'])
   })
 })
