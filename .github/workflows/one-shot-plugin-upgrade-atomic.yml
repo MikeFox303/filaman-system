@@ -1,0 +1,79 @@
+name: One-shot atomic plugin upgrade hardening
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/one-shot-plugin-upgrade-atomic.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: one-shot-plugin-upgrade-atomic
+  cancel-in-progress: true
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/plugin-upgrade-atomic
+          fetch-depth: 0
+
+      - name: Patch installer and regression tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          service_path = Path('backend/app/services/plugin_service.py')
+          text = service_path.read_text()
+          text = text.replace('from typing import Any, Callable\n', 'from typing import Any, Callable\nfrom uuid import uuid4\n', 1)
+
+          start = text.index('            # 8. Upgrade oder Neuinstallation pruefen')
+          end = text.index('    # ------------------------------------------------------------------ #\n    #  Deinstallation', start)
+          new_block = '''            # 8. Upgrade oder Neuinstallation pruefen\n            plugin_key = manifest["plugin_key"]\n            existing = await self._find_existing(plugin_key)\n            is_upgrade = existing is not None\n\n            # 9. Stage the candidate beside the live plugin.  Keeping staging\n            # on the same filesystem lets the final rename be atomic and, more\n            # importantly, leaves the currently working plugin untouched while\n            # validation/dependency installation can still fail.\n            PLUGINS_DIR.mkdir(parents=True, exist_ok=True)\n            target_dir = PLUGINS_DIR / plugin_key\n            staging_dir = Path(\n                tempfile.mkdtemp(prefix=f".{plugin_key}.staging-", dir=PLUGINS_DIR)\n            )\n            backup_dir = PLUGINS_DIR / f".{plugin_key}.backup-{uuid4().hex}"\n            swapped = False\n            backup_created = False\n\n            try:\n                shutil.copytree(plugin_dir, staging_dir, dirs_exist_ok=True)\n\n                # Dependencies are process-wide and cannot be made transactional,\n                # but installing them before the file swap guarantees a failed\n                # resolver/download never deletes the old plugin.\n                dependencies = manifest.get("dependencies", [])\n                if dependencies:\n                    await self._install_dependencies(dependencies, plugin_key)\n\n                # Stop running drivers only after all non-destructive preparation\n                # succeeded.  Startup bootstrap upgrades do not pass a callback.\n                if is_upgrade and stop_callback:\n                    await stop_callback(existing.driver_key or plugin_key)\n\n                # Atomic file swap with a same-filesystem rollback copy.\n                if target_dir.exists():\n                    target_dir.rename(backup_dir)\n                    backup_created = True\n                staging_dir.rename(target_dir)\n                swapped = True\n\n                try:\n                    # 10. DB-Eintrag erstellen oder aktualisieren.  The DB commit\n                    # is part of the transaction boundary: if it fails, restore\n                    # the old directory before propagating the exception.\n                    if existing:\n                        existing.name = manifest["name"]\n                        existing.version = manifest["version"]\n                        existing.description = manifest.get("description")\n                        existing.author = manifest.get("author")\n                        existing.homepage = manifest.get("homepage")\n                        existing.license = manifest.get("license")\n                        existing.plugin_type = plugin_type\n                        existing.driver_key = manifest.get("driver_key")\n                        existing.page_url = manifest.get("page_url")\n                        existing.config_schema = manifest.get("config_schema")\n                        existing.capabilities = manifest.get("capabilities")\n                        existing.show_in_nav = manifest.get("show_in_nav", False)\n                        await self.db.commit()\n                        await self.db.refresh(existing)\n                        plugin = existing\n                    else:\n                        plugin = InstalledPlugin(\n                            plugin_key=plugin_key,\n                            name=manifest["name"],\n                            version=manifest["version"],\n                            description=manifest.get("description"),\n                            author=manifest.get("author"),\n                            homepage=manifest.get("homepage"),\n                            license=manifest.get("license"),\n                            plugin_type=plugin_type,\n                            driver_key=manifest.get("driver_key"),\n                            page_url=manifest.get("page_url"),\n                            config_schema=manifest.get("config_schema"),\n                            capabilities=manifest.get("capabilities"),\n                            show_in_nav=manifest.get("show_in_nav", False),\n                            is_active=True,\n                            installed_by=installed_by,\n                        )\n                        self.db.add(plugin)\n                        await self.db.commit()\n                        await self.db.refresh(plugin)\n                except Exception:\n                    await self.db.rollback()\n                    if swapped and target_dir.exists():\n                        shutil.rmtree(target_dir)\n                    if backup_created and backup_dir.exists():\n                        backup_dir.rename(target_dir)\n                        backup_created = False\n                    raise\n\n                # Commit succeeded.  Only now is the rollback copy disposable.\n                if backup_created and backup_dir.exists():\n                    shutil.rmtree(backup_dir)\n                    backup_created = False\n\n                action = "aktualisiert" if is_upgrade else "installiert"\n                logger.info(\n                    "Plugin '%s' auf v%s %s",\n                    plugin_key,\n                    manifest["version"],\n                    action,\n                )\n                return plugin, is_upgrade\n            finally:\n                # A successful rename moved staging away.  On failures before\n                # the swap, remove only the staged candidate; never delete a\n                # backup that could be the last known-good plugin copy.\n                if staging_dir.exists():\n                    shutil.rmtree(staging_dir)\n\n'''
+          text = text[:start] + new_block + text[end:]
+          service_path.write_text(text)
+
+          tests_path = Path('backend/tests/test_plugin_service.py')
+          tests = tests_path.read_text()
+          tests = tests.replace('from unittest.mock import patch\n', 'from unittest.mock import AsyncMock, patch\n', 1)
+
+          append = r'''\n\nclass TestAtomicPluginUpgrade:\n    @staticmethod\n    def _versioned_zip(version: str, *, dependencies=None, marker: str = "v1") -> bytes:\n        manifest = {**VALID_MANIFEST, "version": version}\n        if dependencies is not None:\n            manifest["dependencies"] = dependencies\n        return _make_zip(\n            {\n                "plugin.json": json.dumps(manifest),\n                "driver.py": VALID_DRIVER_PY + f"\\nMARKER = {marker!r}\\n",\n                "__init__.py": VALID_INIT_PY,\n            }\n        )\n\n    @pytest.mark.asyncio\n    async def test_dependency_failure_preserves_old_plugin_and_db_version(self, db_session):\n        service = PluginInstallService(db_session)\n        with tempfile.TemporaryDirectory() as tmpdir:\n            plugins_dir = Path(tmpdir)\n            with patch("app.services.plugin_service.PLUGINS_DIR", plugins_dir):\n                await service.install_from_zip(\n                    self._versioned_zip("1.0.0", marker="old"), installed_by=1\n                )\n                old_manifest = (plugins_dir / "test_plugin" / "plugin.json").read_text()\n\n                service._install_dependencies = AsyncMock(\n                    side_effect=PluginInstallError("dependency failed", "dependency_install_failed")\n                )\n                with pytest.raises(PluginInstallError) as excinfo:\n                    await service.install_from_zip(\n                        self._versioned_zip(\n                            "2.0.0", dependencies=["definitely-not-installed"], marker="new"\n                        ),\n                        installed_by=1,\n                    )\n\n                assert excinfo.value.code == "dependency_install_failed"\n                assert (plugins_dir / "test_plugin" / "plugin.json").read_text() == old_manifest\n                assert json.loads(old_manifest)["version"] == "1.0.0"\n                installed = await service.get_plugin("test_plugin")\n                assert installed is not None\n                assert installed.version == "1.0.0"\n                assert not list(plugins_dir.glob(".test_plugin.backup-*"))\n                assert not list(plugins_dir.glob(".test_plugin.staging-*"))\n\n    @pytest.mark.asyncio\n    async def test_db_commit_failure_restores_old_plugin_directory(self, db_session):\n        service = PluginInstallService(db_session)\n        with tempfile.TemporaryDirectory() as tmpdir:\n            plugins_dir = Path(tmpdir)\n            with patch("app.services.plugin_service.PLUGINS_DIR", plugins_dir):\n                await service.install_from_zip(\n                    self._versioned_zip("1.0.0", marker="old"), installed_by=1\n                )\n                old_driver = (plugins_dir / "test_plugin" / "driver.py").read_text()\n\n                real_commit = db_session.commit\n                db_session.commit = AsyncMock(side_effect=RuntimeError("db commit failed"))\n                try:\n                    with pytest.raises(RuntimeError, match="db commit failed"):\n                        await service.install_from_zip(\n                            self._versioned_zip("2.0.0", marker="new"), installed_by=1\n                        )\n                finally:\n                    db_session.commit = real_commit\n\n                assert (plugins_dir / "test_plugin" / "driver.py").read_text() == old_driver\n                assert "MARKER = 'old'" in old_driver\n                assert not list(plugins_dir.glob(".test_plugin.backup-*"))\n                assert not list(plugins_dir.glob(".test_plugin.staging-*"))\n                installed = await service.get_plugin("test_plugin")\n                assert installed is not None\n                assert installed.version == "1.0.0"\n'''
+          if 'class TestAtomicPluginUpgrade:' not in tests:
+              tests += append
+          tests_path.write_text(tests)
+          PY
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --frozen --extra dev
+
+      - name: Lint changed files
+        working-directory: backend
+        run: |
+          uv run ruff check app/services/plugin_service.py tests/test_plugin_service.py
+          uv run ruff format --check app/services/plugin_service.py tests/test_plugin_service.py
+
+      - name: Focused plugin service tests
+        working-directory: backend
+        run: uv run pytest tests/test_plugin_service.py -q
+
+      - name: Full backend suite
+        working-directory: backend
+        run: uv run pytest tests/ --tb=short
+
+      - name: Commit validated patch and remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/one-shot-plugin-upgrade-atomic.yml
+          git add backend/app/services/plugin_service.py backend/tests/test_plugin_service.py
+          git commit -m "fix: make plugin upgrades rollback-safe"
+          git push origin HEAD:fix/plugin-upgrade-atomic
