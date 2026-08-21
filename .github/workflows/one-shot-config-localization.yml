@@ -1,0 +1,112 @@
+name: One-shot plugin config localization wiring
+
+on:
+  push:
+    branches: [fix/plugin-config-localization]
+    paths:
+      - ".github/workflows/one-shot-config-localization.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: one-shot-plugin-config-localization
+  cancel-in-progress: true
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/plugin-config-localization
+          fetch-depth: 0
+
+      - name: Wire localized schema metadata into both printer forms
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          detail = Path('frontend/src/pages/printers/[id].astro')
+          text = detail.read_text()
+          replacements = [
+              (
+                  "import { buildDriverConfigPayload, enumLabels, isStructuredProp } from '../../lib/driver-config-form'",
+                  "import { buildDriverConfigPayload, enumLabels, isStructuredProp, schemaDescription, schemaTitle } from '../../lib/driver-config-form'",
+              ),
+              (
+                  "const label = escapeHtml((prop as any).title || key)",
+                  "const label = escapeHtml(schemaTitle(prop as any, getLang(), key))",
+              ),
+              (
+                  "const label = escapeHtml(p.title || key) + (isRequired ? ' *' : '')",
+                  "const label = escapeHtml(schemaTitle(p, getLang(), key)) + (isRequired ? ' *' : '')",
+              ),
+              (
+                  "        if (p.description) {\n          html += `<div style=\"font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;\">${escapeHtml(p.description)}</div>`\n        }",
+                  "        const description = schemaDescription(p, getLang())\n        if (description) {\n          html += `<div style=\"font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;\">${escapeHtml(description)}</div>`\n        }",
+              ),
+          ]
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f'detail page replacement anchor missing: {old[:80]}')
+              text = text.replace(old, new, 1)
+          detail.write_text(text)
+
+          index = Path('frontend/src/pages/printers/index.astro')
+          text = index.read_text()
+          replacements = [
+              (
+                  "import { buildDriverConfigPayload, enumLabels, isStructuredProp } from '../../lib/driver-config-form'",
+                  "import { buildDriverConfigPayload, enumLabels, isStructuredProp, schemaDescription, schemaTitle } from '../../lib/driver-config-form'",
+              ),
+              (
+                  "label.textContent = (prop.title || key) + (required.includes(key) ? ' *' : '')",
+                  "label.textContent = schemaTitle(prop, getLang(), key) + (required.includes(key) ? ' *' : '')",
+              ),
+              (
+                  "          if (prop.description) {\n            const hint = document.createElement('div')\n            hint.style.cssText = 'font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;'\n            hint.textContent = prop.description\n            div.appendChild(hint)\n          }",
+                  "          const structuredDescription = schemaDescription(prop, getLang())\n          if (structuredDescription) {\n            const hint = document.createElement('div')\n            hint.style.cssText = 'font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;'\n            hint.textContent = structuredDescription\n            div.appendChild(hint)\n          }",
+              ),
+              (
+                  "        if (prop.description) {\n          const hint = document.createElement('div')\n          hint.style.cssText = 'font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;'\n          hint.textContent = prop.description\n          div.appendChild(hint)\n        }",
+                  "        const description = schemaDescription(prop, getLang())\n        if (description) {\n          const hint = document.createElement('div')\n          hint.style.cssText = 'font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;'\n          hint.textContent = description\n          div.appendChild(hint)\n        }",
+              ),
+          ]
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f'index page replacement anchor missing: {old[:80]}')
+              text = text.replace(old, new, 1)
+          index.write_text(text)
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Regression tests
+        working-directory: frontend
+        run: npx vitest run src/lib/driver-config-form.test.ts
+
+      - name: Astro type check
+        working-directory: frontend
+        run: npx astro check
+
+      - name: Production build
+        working-directory: frontend
+        run: npx astro build
+
+      - name: Commit validated page wiring and remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/one-shot-config-localization.yml
+          git add frontend/src/pages/printers/'[id].astro' frontend/src/pages/printers/index.astro
+          git commit -m "feat: render localized plugin config metadata"
+          git push origin HEAD:fix/plugin-config-localization
