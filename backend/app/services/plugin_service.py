@@ -12,6 +12,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -146,70 +147,113 @@ class PluginInstallService:
             existing = await self._find_existing(plugin_key)
             is_upgrade = existing is not None
 
-            # 8a. Bei Upgrade: Laufende Treiber stoppen
-            if is_upgrade and stop_callback:
-                await stop_callback(existing.driver_key or plugin_key)
-
-            # 9. Plugin in plugins-Verzeichnis kopieren
+            # Prepare on the same persistent filesystem so promotion/rollback
+            # uses atomic renames and preparation never destroys the live plugin.
+            PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
             target_dir = PLUGINS_DIR / plugin_key
-            if target_dir.exists():
-                shutil.rmtree(target_dir)
-            shutil.copytree(plugin_dir, target_dir)
+            staging_dir = Path(
+                tempfile.mkdtemp(prefix=f".{plugin_key}.staging-", dir=PLUGINS_DIR)
+            )
+            backup_dir = PLUGINS_DIR / f".{plugin_key}.backup-{uuid4().hex}"
+            backup_created = False
+            swapped = False
 
             try:
-                # 9a. Dependencies installieren (falls vorhanden)
+                shutil.copytree(plugin_dir, staging_dir, dirs_exist_ok=True)
                 dependencies = manifest.get("dependencies", [])
                 if dependencies:
                     await self._install_dependencies(dependencies, plugin_key)
-            except Exception:
-                # Cleanup: Verzeichnis entfernen bei Fehler
-                if target_dir.exists():
-                    shutil.rmtree(target_dir)
-                raise
 
-            # 10. DB-Eintrag erstellen oder aktualisieren
-            if existing:
-                existing.name = manifest["name"]
-                existing.version = manifest["version"]
-                existing.description = manifest.get("description")
-                existing.author = manifest.get("author")
-                existing.homepage = manifest.get("homepage")
-                existing.license = manifest.get("license")
-                existing.plugin_type = plugin_type
-                existing.driver_key = manifest.get("driver_key")
-                existing.page_url = manifest.get("page_url")
-                existing.config_schema = manifest.get("config_schema")
-                existing.capabilities = manifest.get("capabilities")
-                existing.show_in_nav = manifest.get("show_in_nav", False)
-                await self.db.commit()
-                await self.db.refresh(existing)
+                if is_upgrade and stop_callback:
+                    await stop_callback(existing.driver_key or plugin_key)
+
+                if target_dir.exists():
+                    target_dir.rename(backup_dir)
+                    backup_created = True
+                try:
+                    staging_dir.rename(target_dir)
+                    swapped = True
+                except Exception:
+                    if backup_created and backup_dir.exists() and not target_dir.exists():
+                        backup_dir.rename(target_dir)
+                        backup_created = False
+                    raise
+
+                if existing:
+                    existing.name = manifest["name"]
+                    existing.version = manifest["version"]
+                    existing.description = manifest.get("description")
+                    existing.author = manifest.get("author")
+                    existing.homepage = manifest.get("homepage")
+                    existing.license = manifest.get("license")
+                    existing.plugin_type = plugin_type
+                    existing.driver_key = manifest.get("driver_key")
+                    existing.page_url = manifest.get("page_url")
+                    existing.config_schema = manifest.get("config_schema")
+                    existing.capabilities = manifest.get("capabilities")
+                    existing.show_in_nav = manifest.get("show_in_nav", False)
+                    plugin = existing
+                else:
+                    plugin = InstalledPlugin(
+                        plugin_key=plugin_key,
+                        name=manifest["name"],
+                        version=manifest["version"],
+                        description=manifest.get("description"),
+                        author=manifest.get("author"),
+                        homepage=manifest.get("homepage"),
+                        license=manifest.get("license"),
+                        plugin_type=plugin_type,
+                        driver_key=manifest.get("driver_key"),
+                        page_url=manifest.get("page_url"),
+                        config_schema=manifest.get("config_schema"),
+                        capabilities=manifest.get("capabilities"),
+                        show_in_nav=manifest.get("show_in_nav", False),
+                        is_active=True,
+                        installed_by=installed_by,
+                    )
+                    self.db.add(plugin)
+
+                try:
+                    await self.db.commit()
+                except Exception:
+                    await self.db.rollback()
+                    if swapped and target_dir.exists():
+                        shutil.rmtree(target_dir)
+                    if backup_created and backup_dir.exists():
+                        backup_dir.rename(target_dir)
+                        backup_created = False
+                    raise
+
+                try:
+                    await self.db.refresh(plugin)
+                except Exception:
+                    logger.exception(
+                        "Plugin '%s' committed but DB refresh failed; keeping committed upgrade",
+                        plugin_key,
+                    )
+
+                if backup_created and backup_dir.exists():
+                    try:
+                        shutil.rmtree(backup_dir)
+                    except OSError:
+                        logger.exception(
+                            "Plugin '%s' upgraded but rollback directory cleanup failed: %s",
+                            plugin_key,
+                            backup_dir,
+                        )
+                    backup_created = False
+
+                action = "aktualisiert" if is_upgrade else "installiert"
                 logger.info(
-                    f"Plugin '{plugin_key}' auf v{manifest['version']} aktualisiert"
+                    "Plugin '%s' v%s erfolgreich %s",
+                    plugin_key,
+                    manifest["version"],
+                    action,
                 )
-                return existing, True
-            else:
-                plugin = InstalledPlugin(
-                    plugin_key=plugin_key,
-                    name=manifest["name"],
-                    version=manifest["version"],
-                    description=manifest.get("description"),
-                    author=manifest.get("author"),
-                    homepage=manifest.get("homepage"),
-                    license=manifest.get("license"),
-                    plugin_type=plugin_type,
-                    driver_key=manifest.get("driver_key"),
-                    page_url=manifest.get("page_url"),
-                    config_schema=manifest.get("config_schema"),
-                    capabilities=manifest.get("capabilities"),
-                    show_in_nav=manifest.get("show_in_nav", False),
-                    is_active=True,
-                    installed_by=installed_by,
-                )
-                self.db.add(plugin)
-                await self.db.commit()
-                await self.db.refresh(plugin)
-                logger.info(f"Plugin '{plugin_key}' v{manifest['version']} installiert")
-                return plugin, False
+                return plugin, is_upgrade
+            finally:
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir)
 
     # ------------------------------------------------------------------ #
     #  Deinstallation

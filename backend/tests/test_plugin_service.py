@@ -3,7 +3,7 @@ import json
 import tempfile
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -394,3 +394,98 @@ class TestInstallFromZip:
 
         assert is_upgrade is False
         assert plugin.plugin_key == "test_plugin"
+
+
+class TestAtomicPluginUpgrade:
+    @staticmethod
+    def _versioned_zip(version: str, *, dependencies=None, marker: str = "v1") -> bytes:
+        manifest = {**VALID_MANIFEST, "version": version}
+        if dependencies is not None:
+            manifest["dependencies"] = dependencies
+        return _make_zip({
+            "plugin.json": json.dumps(manifest),
+            "driver.py": VALID_DRIVER_PY + f"\nMARKER = {marker!r}\n",
+            "__init__.py": VALID_INIT_PY,
+        })
+
+    @pytest.mark.asyncio
+    async def test_dependency_failure_preserves_old_plugin_and_db_version(self, db_session):
+        service = PluginInstallService(db_session)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugins_dir = Path(tmpdir)
+            with patch("app.services.plugin_service.PLUGINS_DIR", plugins_dir):
+                await service.install_from_zip(
+                    self._versioned_zip("1.0.0", marker="old"), installed_by=1
+                )
+                old_manifest = (plugins_dir / "test_plugin" / "plugin.json").read_text()
+                stop_callback = AsyncMock()
+                service._install_dependencies = AsyncMock(
+                    side_effect=PluginInstallError(
+                        "dependency failed", "dependency_install_failed"
+                    )
+                )
+                with pytest.raises(PluginInstallError) as excinfo:
+                    await service.install_from_zip(
+                        self._versioned_zip(
+                            "2.0.0",
+                            dependencies=["definitely-not-installed"],
+                            marker="new",
+                        ),
+                        installed_by=1,
+                        stop_callback=stop_callback,
+                    )
+                assert excinfo.value.code == "dependency_install_failed"
+                stop_callback.assert_not_awaited()
+                assert (plugins_dir / "test_plugin" / "plugin.json").read_text() == old_manifest
+                installed = await service.get_plugin("test_plugin")
+                assert installed is not None and installed.version == "1.0.0"
+                assert not list(plugins_dir.glob(".test_plugin.backup-*"))
+                assert not list(plugins_dir.glob(".test_plugin.staging-*"))
+
+    @pytest.mark.asyncio
+    async def test_db_commit_failure_restores_old_plugin_directory(self, db_session):
+        service = PluginInstallService(db_session)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugins_dir = Path(tmpdir)
+            with patch("app.services.plugin_service.PLUGINS_DIR", plugins_dir):
+                await service.install_from_zip(
+                    self._versioned_zip("1.0.0", marker="old"), installed_by=1
+                )
+                old_driver = (plugins_dir / "test_plugin" / "driver.py").read_text()
+                real_commit = db_session.commit
+                db_session.commit = AsyncMock(side_effect=RuntimeError("db commit failed"))
+                try:
+                    with pytest.raises(RuntimeError, match="db commit failed"):
+                        await service.install_from_zip(
+                            self._versioned_zip("2.0.0", marker="new"), installed_by=1
+                        )
+                finally:
+                    db_session.commit = real_commit
+                assert (plugins_dir / "test_plugin" / "driver.py").read_text() == old_driver
+                installed = await service.get_plugin("test_plugin")
+                assert installed is not None and installed.version == "1.0.0"
+                assert not list(plugins_dir.glob(".test_plugin.backup-*"))
+                assert not list(plugins_dir.glob(".test_plugin.staging-*"))
+
+    @pytest.mark.asyncio
+    async def test_successful_upgrade_replaces_files_and_cleans_rollback_dirs(self, db_session):
+        service = PluginInstallService(db_session)
+        stop_callback = AsyncMock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugins_dir = Path(tmpdir)
+            with patch("app.services.plugin_service.PLUGINS_DIR", plugins_dir):
+                await service.install_from_zip(
+                    self._versioned_zip("1.0.0", marker="old"), installed_by=1
+                )
+                plugin, is_upgrade = await service.install_from_zip(
+                    self._versioned_zip("2.0.0", marker="new"),
+                    installed_by=1,
+                    stop_callback=stop_callback,
+                )
+                assert is_upgrade is True and plugin.version == "2.0.0"
+                assert "MARKER = 'new'" in (
+                    plugins_dir / "test_plugin" / "driver.py"
+                ).read_text()
+                stop_callback.assert_awaited_once_with("test_plugin")
+                assert not list(plugins_dir.glob(".test_plugin.backup-*"))
+                assert not list(plugins_dir.glob(".test_plugin.staging-*"))

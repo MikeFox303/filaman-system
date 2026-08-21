@@ -24,6 +24,7 @@ from app.core.seeds import run_all_seeds
 from app.core.shared_health import shared_health_store
 from app.plugins.manager import plugin_manager
 from app.services.plugin_service import PLUGINS_DIR
+from app.services.managed_plugin_service import ensure_managed_plugins
 
 setup_logging()
 logger = __import__("logging").getLogger(__name__)
@@ -266,6 +267,7 @@ async def lifespan(app: FastAPI):
     if _is_primary:
         async with async_session_maker() as db:
             await run_all_seeds(db)
+            await ensure_managed_plugins(db)
         await plugin_manager.start_all()
         # Publish initial health so secondary workers have data immediately
         initial_health = plugin_manager.get_health()
