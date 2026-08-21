@@ -3,7 +3,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.services.managed_plugin_service import (
+    BAMBUDDY_PLUGIN_ASSET,
     BAMBUDDY_PLUGIN_KEY,
+    BAMBUDDY_PLUGIN_SHA256,
     BAMBUDDY_PLUGIN_VERSION,
     _read_verified_asset,
     _version_tuple,
@@ -12,9 +14,15 @@ from app.services.managed_plugin_service import (
 
 
 def test_version_tuple():
-    assert _version_tuple("1.3.8") == (1, 3, 8)
-    assert _version_tuple("1.3.8-rc1") == (1, 3, 8)
+    assert _version_tuple("1.3.9") == (1, 3, 9)
+    assert _version_tuple("1.3.9-rc1") == (1, 3, 9)
     assert _version_tuple("broken") is None
+
+
+def test_x2d_managed_plugin_release_is_pinned():
+    assert BAMBUDDY_PLUGIN_VERSION == "1.3.9"
+    assert BAMBUDDY_PLUGIN_ASSET.name == "bambuddy-1.3.9.zip"
+    assert BAMBUDDY_PLUGIN_SHA256 == "e238a87baf1ba4ffb55f0771ac16ddc1f50836713c29911ec3cc9415c4bd41ec"
 
 
 def test_checksum_mismatch_fails_closed(tmp_path):

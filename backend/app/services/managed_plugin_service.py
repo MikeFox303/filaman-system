@@ -12,9 +12,9 @@ from app.services.plugin_service import PluginInstallService
 logger = logging.getLogger(__name__)
 
 BAMBUDDY_PLUGIN_KEY = "bambuddy"
-BAMBUDDY_PLUGIN_VERSION = "1.3.8"
-BAMBUDDY_PLUGIN_SHA256 = "a41f6bd38f9ebce1f21b620f9ce7ea8ab3984fc2a633cffe18e33518e906d508"
-BAMBUDDY_PLUGIN_ASSET = Path("/app/managed_plugins/bambuddy-1.3.8.zip")
+BAMBUDDY_PLUGIN_VERSION = "1.3.9"
+BAMBUDDY_PLUGIN_SHA256 = "e238a87baf1ba4ffb55f0771ac16ddc1f50836713c29911ec3cc9415c4bd41ec"
+BAMBUDDY_PLUGIN_ASSET = Path("/app/managed_plugins/bambuddy-1.3.9.zip")
 
 
 def _version_tuple(value: str) -> tuple[int, int, int] | None:

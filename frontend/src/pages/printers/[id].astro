@@ -23,6 +23,7 @@ const { id } = Astro.params
     import { t, initI18n, getLang } from '../../lib/i18n'
     import { getAbortSignal, isAbortError } from '../../lib/abort'
     import { buildDriverConfigPayload, enumLabels, isStructuredProp, schemaDescription, schemaTitle } from '../../lib/driver-config-form'
+    import { driverSyncActionLabel } from '../../lib/driver-action-label'
     await initI18n()
 
     const id = window.location.pathname.split('/').filter(Boolean).pop()!
@@ -337,7 +338,7 @@ const { id } = Astro.params
                 ${startStopBtn}
                 <button id="btn-debug-console" class="fm-btn fm-btn-outline" style="font-size: 0.85rem;">${t('printers.debugConsole')}</button>
                 ${isRunning ? (driverHealth?.sync_actions || []).map((a: any) => {
-                  const label = getLang() === 'de' ? (a.label_de || a.label) : a.label
+                  const label = driverSyncActionLabel(a, getLang())
                   const variant = a.variant === 'danger' ? 'fm-btn-danger' : 'fm-btn-outline'
                   return `<button class="fm-btn ${variant} btn-sync-action" data-action="${escapeHtml(a.action)}" style="font-size: 0.85rem;">${escapeHtml(label)}</button>`
                 }).join('') : ''}
