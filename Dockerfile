@@ -67,6 +67,9 @@ COPY --from=backend-builder /usr/local/bin /usr/local/bin
 # Copy backend application
 COPY --from=backend-builder /app/backend /app
 
+# Checksum-pinned release-managed plugin artifacts
+COPY backend/managed_plugins /app/managed_plugins
+
 # Copy built frontend to the static directory
 # The FastAPI app must be configured to serve static files from this directory.
 COPY --from=frontend-builder /app/frontend/dist /app/static
