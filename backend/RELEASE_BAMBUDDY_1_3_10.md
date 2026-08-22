@@ -1,0 +1,1 @@
+Managed Bambuddy plugin 1.3.10 is bundled from plugin commit 477c0356285d62d5e1f1a3eb9cee88e2d73bcf00. This release fixes SQLAlchemy MissingGreenlet during X2D spool consumption writes and preserves the existing source_event_key across retries.
