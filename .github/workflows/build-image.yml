@@ -84,7 +84,9 @@ jobs:
 
   build:
     name: Multi-arch GHCR image
-    if: github.event_name != 'pull_request'
+    if: >-
+      (github.event_name == 'push' && github.ref_name == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref_name == 'main')
     needs: [backend, frontend]
     runs-on: ubuntu-latest
     steps:
