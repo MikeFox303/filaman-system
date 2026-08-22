@@ -18,31 +18,10 @@ permissions:
   packages: write
 
 jobs:
-  preflight:
-    runs-on: ubuntu-latest
-    outputs:
-      allow_build: ${{ steps.guard.outputs.allow_build }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-      - name: Check upstream adapter guard
-        id: guard
-        shell: bash
-        run: |
-          if [[ -f .github/UPSTREAM_ADAPTER_ACTIVE ]]; then
-            echo 'allow_build=false' >> "$GITHUB_OUTPUT"
-            echo 'Image build suppressed while guarded upstream adaptation is active.'
-          else
-            echo 'allow_build=true' >> "$GITHUB_OUTPUT"
-          fi
-
   build:
-    needs: preflight
     if: >-
-      needs.preflight.outputs.allow_build == 'true' &&
-      (github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'))
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
