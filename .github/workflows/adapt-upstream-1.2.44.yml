@@ -1,6 +1,12 @@
 name: Adapt upstream FilaMan 1.2.44
 
 on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/adapt-upstream-1.2.44.yml
   push:
     branches:
       - sync/upstream-2026-08-22
@@ -16,6 +22,7 @@ concurrency:
 
 jobs:
   adapt:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
