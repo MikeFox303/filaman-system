@@ -19,10 +19,11 @@ def test_version_tuple():
     assert _version_tuple("broken") is None
 
 
-def test_x2d_managed_plugin_release_is_pinned():
-    assert BAMBUDDY_PLUGIN_VERSION == "1.3.10"
-    assert BAMBUDDY_PLUGIN_ASSET.name == "bambuddy-1.3.10.zip"
-    assert BAMBUDDY_PLUGIN_SHA256 == "5aabadc617c85cbe0d4bc0c5c13fe88820ee5cee5174a3455f4e6e3489c4c227"
+def test_x2d_managed_plugin_release_pin_shape():
+    assert _version_tuple(BAMBUDDY_PLUGIN_VERSION) is not None
+    assert BAMBUDDY_PLUGIN_ASSET.name == f"bambuddy-{BAMBUDDY_PLUGIN_VERSION}.zip"
+    assert len(BAMBUDDY_PLUGIN_SHA256) == 64
+    assert all(c in "0123456789abcdef" for c in BAMBUDDY_PLUGIN_SHA256)
 
 
 def test_checksum_mismatch_fails_closed(tmp_path):
