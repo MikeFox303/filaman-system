@@ -1,0 +1,19 @@
+name: Temporary trigger managed Bambuddy 1.3.11
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    if: github.head_ref == 'ops/trigger-managed-bambuddy-1.3.11'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch validated managed-plugin sync from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run sync-managed-bambuddy-plugin.yml --repo "$GITHUB_REPOSITORY" --ref main
