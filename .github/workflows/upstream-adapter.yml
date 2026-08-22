@@ -1,0 +1,258 @@
+name: Guarded upstream adapter
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: filaman-upstream-adapter
+  cancel-in-progress: false
+
+jobs:
+  adapt:
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/adapt-filaman-1.2.44' &&
+      github.event.issue.number == 16
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: sync/upstream-2026-08-22
+          fetch-depth: 0
+
+      - name: Merge and adapt exact upstream
+        id: adapt
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee /tmp/adapter.log) 2>&1
+          LOCAL_SHA=c463135e3eabc9f17e809f74d692b78bfb13dc56
+          COMMON_BASE=ebc0bcc83e34665bc699a0a259489f7d21d03a80
+          UPSTREAM_SHA=ed26335b85413348d547ab12ad9149425ffcb296
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git reset --hard "${LOCAL_SHA}"
+          git remote add upstream https://github.com/Fire-Devils/filaman-system.git
+          git fetch upstream main --tags
+
+          test "$(git rev-parse upstream/main)" = "${UPSTREAM_SHA}"
+          test "$(git merge-base "${LOCAL_SHA}" upstream/main)" = "${COMMON_BASE}"
+
+          set +e
+          git merge --no-commit --no-ff upstream/main
+          merge_rc=$?
+          set -e
+
+          if [[ ${merge_rc} -ne 0 ]]; then
+            actual="$(git diff --name-only --diff-filter=U | sort)"
+            expected="$(cat <<'EOF'
+          backend/app/api/v1/printers.py
+          backend/tests/test_printers.py
+          frontend/package.json
+          frontend/src/i18n/de.json
+          frontend/src/i18n/en.json
+          frontend/src/pages/admin/system/spoolman-import.astro
+          EOF
+          )"
+            echo "Conflict set:"
+            printf '%s\n' "${actual}"
+            [[ "${actual}" == "${expected}" ]] || { echo 'Unexpected conflicts'; exit 1; }
+
+            for path in backend/app/api/v1/printers.py backend/tests/test_printers.py; do
+              git checkout --ours -- "${path}"
+              git add "${path}"
+              git diff "${COMMON_BASE}".."${UPSTREAM_SHA}" -- "${path}" > /tmp/upstream.patch
+              git apply --3way --index /tmp/upstream.patch
+            done
+
+            git checkout --theirs -- frontend/package.json
+            python - <<'PY'
+          from pathlib import Path
+          p = Path('frontend/package.json')
+          s = p.read_text()
+          anchor = '    "test": "vitest run",\n'
+          line = '    "check:i18n": "node scripts/check-i18n.mjs",\n'
+          if line not in s:
+              if anchor not in s:
+                  raise SystemExit('package.json anchor missing')
+              s = s.replace(anchor, anchor + line, 1)
+          p.write_text(s)
+          PY
+            git add frontend/package.json
+
+            git checkout --theirs -- frontend/src/i18n/de.json frontend/src/i18n/en.json
+            python - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          BASE='ebc0bcc83e34665bc699a0a259489f7d21d03a80'
+          LOCAL='c463135e3eabc9f17e809f74d692b78bfb13dc56'
+          def load(ref, path):
+              return json.loads(subprocess.check_output(['git','show',f'{ref}:{path}'], text=True))
+          def changes(a,b,p=()):
+              out=[]
+              for k in sorted(set(a)|set(b)):
+                  kp=p+(k,)
+                  if k not in b: out.append(('delete',kp,None))
+                  elif k not in a: out.append(('set',kp,b[k]))
+                  elif isinstance(a[k],dict) and isinstance(b[k],dict): out += changes(a[k],b[k],kp)
+                  elif a[k] != b[k]: out.append(('set',kp,b[k]))
+              return out
+          def apply(obj, op, path, value):
+              cur=obj
+              for k in path[:-1]: cur=cur.setdefault(k,{})
+              if op=='delete': cur.pop(path[-1],None)
+              else: cur[path[-1]]=value
+          for fn in ('de.json','en.json'):
+              path=f'frontend/src/i18n/{fn}'
+              delta=changes(load(BASE,path),load(LOCAL,path))
+              if len(delta)!=4: raise SystemExit(f'{path}: unexpected local delta {delta}')
+              obj=json.loads(Path(path).read_text())
+              for d in delta: apply(obj,*d)
+              Path(path).write_text(json.dumps(obj,ensure_ascii=False,indent=2)+'\n')
+          PY
+            git add frontend/src/i18n/de.json frontend/src/i18n/en.json
+
+            git checkout --theirs -- frontend/src/pages/admin/system/spoolman-import.astro
+            python - <<'PY'
+          from pathlib import Path
+          p=Path('frontend/src/pages/admin/system/spoolman-import.astro')
+          s=p.read_text()
+          old='id="btn-repair-transparency" class="fm-btn fm-btn-outline hidden"'
+          new=old+' data-i18n="spoolman.repairTransparency"'
+          if new not in s:
+              if old not in s: raise SystemExit('repair button anchor missing')
+              s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+            git add frontend/src/pages/admin/system/spoolman-import.astro
+          fi
+
+          test -z "$(git diff --name-only --diff-filter=U)"
+          grep -q 'source_event_key' backend/app/models/spool.py
+          grep -q 'BAMBUDDY_PLUGIN_VERSION = "1.3.10"' backend/app/services/managed_plugin_service.py
+          grep -q 'bambuddy-1.3.10.zip' backend/app/services/managed_plugin_service.py
+          test -f backend/managed_plugins/bambuddy-1.3.10.zip
+          grep -q '1000' backend/alembic/versions/normalize_x2d_external_slots.py
+          grep -q '1001' backend/alembic/versions/normalize_x2d_external_slots.py
+          grep -q '_PRIMARY_PROXY_BASE_URL = "http://127.0.0.1:8000"' backend/app/api/v1/printers.py
+          grep -q 'primary_proxy_invalid_response' backend/app/api/v1/printers.py
+          test "$(tr -d '\r\n' < version.txt)" = '1.2.44'
+
+          git add -A
+          git status --short
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Backend release gate before push
+        shell: bash
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          uv sync --frozen --extra dev
+          uv run pytest tests/test_spool_service.py -q
+          HEAD_COUNT="$(uv run alembic heads | grep -E '^[0-9a-zA-Z_]+ ' | wc -l)"
+          test "$HEAD_COUNT" -eq 1
+          MIGRATION_DB="$RUNNER_TEMP/upstream_adapter_migration.db"
+          rm -f "$MIGRATION_DB"
+          DATABASE_URL="sqlite+aiosqlite:///$MIGRATION_DB" uv run alembic upgrade head
+          uv run pytest -q
+
+      - name: Commit and push adapted tree
+        id: push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git commit -m 'chore: adapt FilaMan upstream 1.2.44'
+          git push --force-with-lease origin HEAD:sync/upstream-2026-08-22
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Report success
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_SHA: ${{ steps.push.outputs.sha }}
+        run: gh pr comment 16 --body "Guarded upstream adaptation succeeded. Full backend tests, Alembic single-head check, and production-equivalent SQLite upgrade passed before push. New sync SHA: \`${NEW_SHA}\`. RU/UK rich-Spoolman localization and frontend validation remain before merge."
+
+      - name: Report failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tail -n 120 /tmp/adapter.log > /tmp/tail.log 2>/dev/null || true
+          {
+            echo 'Guarded upstream adaptation FAILED; no production merge was performed.'
+            echo
+            echo '```text'
+            cat /tmp/tail.log
+            echo '```'
+          } > /tmp/comment.md
+          gh pr comment 16 --body-file /tmp/comment.md
+
+  validate:
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/validate-filaman-1.2.44' &&
+      github.event.issue.number == 16
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: sync/upstream-2026-08-22
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Validate protected invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(tr -d '\r\n' < version.txt)" = '1.2.44'
+          grep -q 'source_event_key' backend/app/models/spool.py
+          grep -q 'BAMBUDDY_PLUGIN_VERSION = "1.3.10"' backend/app/services/managed_plugin_service.py
+          grep -q '1000' backend/alembic/versions/normalize_x2d_external_slots.py
+          grep -q '1001' backend/alembic/versions/normalize_x2d_external_slots.py
+          grep -q 'primary_proxy_invalid_response' backend/app/api/v1/printers.py
+      - name: Full backend and migration gate
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen --extra dev
+          uv run pytest tests/test_spool_service.py -q
+          HEAD_COUNT="$(uv run alembic heads | grep -E '^[0-9a-zA-Z_]+ ' | wc -l)"
+          test "$HEAD_COUNT" -eq 1
+          DB="$RUNNER_TEMP/validation_migration.db"
+          DATABASE_URL="sqlite+aiosqlite:///$DB" uv run alembic upgrade head
+          uv run pytest -q
+      - name: Full frontend/localization gate
+        working-directory: frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run check:i18n
+          npm run check
+          npm test
+          npm run lint
+          npm run build
+      - name: Report validation result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ job.status }}
+        run: gh pr comment 16 --body "Full guarded validation result: **${RESULT}**. This covers backend tests, Alembic topology, SQLite production-equivalent migration, localization parity, frontend type/check, tests, lint and build."
