@@ -1,6 +1,9 @@
 name: Sync managed Bambuddy plugin
 
 on:
+  push:
+    branches:
+      - ops/trigger-managed-bambuddy-1.3.11
   schedule:
     - cron: '17 6 * * *'
   workflow_dispatch:
