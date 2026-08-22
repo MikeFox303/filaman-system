@@ -81,8 +81,6 @@ jobs:
               exit 1
             }
 
-            # package.json: take upstream 1.2.44 lint/test surface and restore
-            # our localization parity command.
             git checkout --theirs -- frontend/package.json
             python - <<'PY'
           import json
@@ -94,8 +92,6 @@ jobs:
           PY
             git add frontend/package.json
 
-            # Spoolman page: take upstream rich-field/repair UI and restore our
-            # localized transparency-repair button attribute.
             git checkout --theirs -- frontend/src/pages/admin/system/spoolman-import.astro
             python - <<'PY'
           from pathlib import Path
@@ -121,10 +117,25 @@ jobs:
           # Add complete RU/UK strings for all upstream 1.2.44 Spoolman keys and
           # require exact English-key and placeholder parity.
           python /tmp/apply_i18n.py
+
+          # check:i18n intentionally rejects values identical to English. The
+          # repairChoicesPlaceholder is user-facing example JSON, so localize
+          # the final choice label while preserving valid JSON syntax.
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          examples = {
+              'ru': '["PLA, CF", "PETG", "Другое"]',
+              'uk': '["PLA, CF", "PETG", "Інше"]',
+          }
+          for lang, example in examples.items():
+              p = Path(f'frontend/src/i18n/{lang}.json')
+              data = json.loads(p.read_text(encoding='utf-8'))
+              data['spoolman']['repairChoicesPlaceholder'] = example
+              p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          PY
           git add frontend/src/i18n/ru.json frontend/src/i18n/uk.json
 
-          # Upstream 1.2.44 does not need to alter our consumption/X2D/managed
-          # plugin safety layer. Any byte-level change here fails closed.
           protected_paths=(
             backend/alembic/versions/add_spool_event_source_key.py
             backend/alembic/versions/normalize_x2d_external_slots.py
@@ -145,9 +156,6 @@ jobs:
             }
           done
 
-          # Verify the automatically merged printer proxy kept our loopback and
-          # explicit query-parameter hardening while adopting upstream 1.2.44's
-          # structured invalid-response failure contract and regression tests.
           grep -Fq 'source_event_key' backend/app/models/spool.py
           grep -Fq 'BAMBUDDY_PLUGIN_VERSION = "1.3.10"' backend/app/services/managed_plugin_service.py
           grep -Fq 'bambuddy-1.3.10.zip' backend/app/services/managed_plugin_service.py
