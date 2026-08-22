@@ -1,6 +1,9 @@
 name: Guarded upstream adapter
 
 on:
+  push:
+    branches:
+      - main
   issue_comment:
     types: [created]
 
@@ -16,9 +19,11 @@ concurrency:
 jobs:
   adapt:
     if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
       github.event.comment.body == '/adapt-filaman-1.2.44' &&
-      github.event.issue.number == 16
+      github.event.issue.number == 16)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -200,6 +205,7 @@ jobs:
 
   validate:
     if: >-
+      github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
       github.event.comment.body == '/validate-filaman-1.2.44' &&
       github.event.issue.number == 16
