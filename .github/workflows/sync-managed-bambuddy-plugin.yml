@@ -209,7 +209,18 @@ jobs:
           existing="$(gh pr list --head "$SYNC_BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
           body="Validated managed Bambuddy plugin update to ${TARGET_VERSION}. Source: MikeFox303/filaman-bambuddy-plugin@${SOURCE_SHA}. Deterministic ZIP SHA256: ${PLUGIN_SHA256}. Compatibility tests passed. Automatic merge is intentionally disabled because plugin updates can affect X2D/AMS/consumption behavior; preserve source_event_key idempotency, MissingGreenlet-safe writes, External Tray mapping and inventory_only."
           if [[ -z "$existing" ]]; then
-            gh pr create --base main --head "$SYNC_BRANCH" --title "chore: managed Bambuddy plugin ${TARGET_VERSION}" --body "$body"
+            if ! gh pr create --base main --head "$SYNC_BRANCH" --title "chore: managed Bambuddy plugin ${TARGET_VERSION}" --body "$body"; then
+              echo "::warning::GitHub Actions may not create pull requests in this repository. The validated staging branch was published successfully; open the review PR manually."
+              {
+                echo "### Managed Bambuddy ${TARGET_VERSION} staged"
+                echo
+                echo "Validated branch: \`${SYNC_BRANCH}\`"
+                echo "Source: \`MikeFox303/filaman-bambuddy-plugin@${SOURCE_SHA}\`"
+                echo "Deterministic ZIP SHA256: \`${PLUGIN_SHA256}\`"
+                echo
+                echo "GitHub Actions could not create the review PR because repository policy may disallow PR creation by workflows. No validation failure occurred. Open a PR from \`${SYNC_BRANCH}\` to \`main\` for manual review."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
             gh pr edit "$existing" --title "chore: managed Bambuddy plugin ${TARGET_VERSION}" --body "$body"
           fi
