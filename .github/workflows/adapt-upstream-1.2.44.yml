@@ -1,0 +1,204 @@
+name: Adapt upstream FilaMan 1.2.44
+
+on:
+  push:
+    branches:
+      - sync/upstream-2026-08-22
+    paths:
+      - .github/workflows/adapt-upstream-1.2.44.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: adapt-upstream-1-2-44
+  cancel-in-progress: false
+
+jobs:
+  adapt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: sync/upstream-2026-08-22
+          fetch-depth: 0
+
+      - name: Build guarded three-way adaptation
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOCAL_SHA=c463135e3eabc9f17e809f74d692b78bfb13dc56
+          COMMON_BASE=ebc0bcc83e34665bc699a0a259489f7d21d03a80
+          UPSTREAM_SHA=ed26335b85413348d547ab12ad9149425ffcb296
+          PROXY_PATCH_COMMIT=bc58a92ce759c4f2eca8d055293291e81bb3612b
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+
+          # Discard this one-shot workflow commit before constructing the real tree.
+          git reset --hard "${LOCAL_SHA}"
+          git remote add upstream https://github.com/Fire-Devils/filaman-system.git
+          git fetch upstream main --tags
+          actual_upstream="$(git rev-parse upstream/main)"
+          if [[ "${actual_upstream}" != "${UPSTREAM_SHA}" ]]; then
+            echo "Refusing adaptation: upstream moved from ${UPSTREAM_SHA} to ${actual_upstream}" >&2
+            exit 1
+          fi
+          if [[ "$(git merge-base "${LOCAL_SHA}" upstream/main)" != "${COMMON_BASE}" ]]; then
+            echo "Refusing adaptation: common base changed" >&2
+            exit 1
+          fi
+
+          set +e
+          git merge --no-commit --no-ff upstream/main
+          merge_rc=$?
+          set -e
+
+          if [[ ${merge_rc} -ne 0 ]]; then
+            actual_conflicts="$(git diff --name-only --diff-filter=U | sort)"
+            expected_conflicts="$(cat <<'EOF'
+          backend/app/api/v1/printers.py
+          backend/tests/test_printers.py
+          frontend/package.json
+          frontend/src/i18n/de.json
+          frontend/src/i18n/en.json
+          frontend/src/pages/admin/system/spoolman-import.astro
+          EOF
+          )"
+            if [[ "${actual_conflicts}" != "${expected_conflicts}" ]]; then
+              echo "Unexpected conflict set; refusing automatic resolution." >&2
+              echo "Expected:" >&2
+              printf '%s\n' "${expected_conflicts}" >&2
+              echo "Actual:" >&2
+              printf '%s\n' "${actual_conflicts}" >&2
+              git merge --abort || true
+              exit 1
+            fi
+
+            # printers.py and its tests only diverged locally in the reviewed
+            # loopback/query-param hardening commit. Verify that invariant, then
+            # replay that exact patch on top of upstream 1.2.44 so the upstream
+            # invalid-response fix remains intact.
+            for path in backend/app/api/v1/printers.py backend/tests/test_printers.py; do
+              git diff "${COMMON_BASE}".."${LOCAL_SHA}" -- "${path}" > /tmp/local.patch
+              git diff "${PROXY_PATCH_COMMIT}^".."${PROXY_PATCH_COMMIT}" -- "${path}" > /tmp/reviewed.patch
+              if ! diff -u /tmp/reviewed.patch /tmp/local.patch; then
+                echo "Unexpected local changes in ${path}; refusing automatic resolution." >&2
+                git merge --abort || true
+                exit 1
+              fi
+              git checkout --theirs -- "${path}"
+              git add "${path}"
+              if ! git apply --3way --index /tmp/reviewed.patch; then
+                echo "Reviewed proxy patch no longer applies cleanly to upstream ${path}." >&2
+                git merge --abort || true
+                exit 1
+              fi
+            done
+
+            # Upstream package.json contains the new Spoolman lint targets.
+            # Preserve our localization gate script alongside it.
+            git checkout --theirs -- frontend/package.json
+            python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('frontend/package.json')
+          data = json.loads(path.read_text())
+          data.setdefault('scripts', {})['check:i18n'] = 'node scripts/check-i18n.mjs'
+          path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+          PY
+            git add frontend/package.json
+
+            # Keep all new upstream en/de keys and apply only our post-1.2.42
+            # leaf-level locale changes (RU/UK selector labels etc.) on top.
+            git checkout --theirs -- frontend/src/i18n/de.json frontend/src/i18n/en.json
+            python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          BASE = 'ebc0bcc83e34665bc699a0a259489f7d21d03a80'
+          LOCAL = 'c463135e3eabc9f17e809f74d692b78bfb13dc56'
+
+          def load_git(ref, path):
+              raw = subprocess.check_output(['git', 'show', f'{ref}:{path}'], text=True)
+              return json.loads(raw)
+
+          def leaf_changes(base, local, prefix=()):
+              changes = []
+              keys = set(base) | set(local)
+              for key in keys:
+                  p = prefix + (key,)
+                  if key not in local:
+                      changes.append(('delete', p, None))
+                      continue
+                  if key not in base:
+                      changes.append(('set', p, local[key]))
+                      continue
+                  b, l = base[key], local[key]
+                  if isinstance(b, dict) and isinstance(l, dict):
+                      changes.extend(leaf_changes(b, l, p))
+                  elif b != l:
+                      changes.append(('set', p, l))
+              return changes
+
+          def apply_change(target, op, path, value):
+              cur = target
+              for key in path[:-1]:
+                  cur = cur.setdefault(key, {})
+              if op == 'delete':
+                  cur.pop(path[-1], None)
+              else:
+                  cur[path[-1]] = value
+
+          for filename in ('de.json', 'en.json'):
+              path = f'frontend/src/i18n/{filename}'
+              base = load_git(BASE, path)
+              local = load_git(LOCAL, path)
+              target = json.loads(Path(path).read_text())
+              changes = leaf_changes(base, local)
+              if len(changes) != 4:
+                  raise SystemExit(f'{path}: expected exactly 4 local leaf changes, got {len(changes)}: {changes}')
+              for op, key_path, value in changes:
+                  apply_change(target, op, key_path, value)
+              Path(path).write_text(json.dumps(target, ensure_ascii=False, indent=2) + '\n')
+          PY
+            git add frontend/src/i18n/de.json frontend/src/i18n/en.json
+
+            # The local Spoolman page change is localization-only. Keep the
+            # upstream 1.2.43 rewrite and re-add the translation hook.
+            git checkout --theirs -- frontend/src/pages/admin/system/spoolman-import.astro
+            python - <<'PY'
+          from pathlib import Path
+          path = Path('frontend/src/pages/admin/system/spoolman-import.astro')
+          text = path.read_text()
+          if 'id="btn-repair-transparency"' in text and 'id="btn-repair-transparency" class="fm-btn fm-btn-outline hidden" data-i18n="spoolman.repairTransparency"' not in text:
+              old = 'id="btn-repair-transparency" class="fm-btn fm-btn-outline hidden"'
+              new = old + ' data-i18n="spoolman.repairTransparency"'
+              if old not in text:
+                  raise SystemExit('Unable to locate transparency repair button safely')
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+            git add frontend/src/pages/admin/system/spoolman-import.astro
+          fi
+
+          if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
+            echo "Unresolved conflicts remain; refusing commit." >&2
+            git diff --name-only --diff-filter=U >&2
+            git merge --abort || true
+            exit 1
+          fi
+
+          # Safety invariants that must be present before the merge commit exists.
+          grep -q 'source_event_key' backend/app/models/spool.py
+          grep -q '1000' backend/alembic/versions/normalize_x2d_external_slots.py
+          grep -q '1001' backend/alembic/versions/normalize_x2d_external_slots.py
+          grep -q 'bambuddy-1.3.10.zip' backend/app/services/managed_plugin_service.py
+          grep -q 'primary_proxy_invalid_response' backend/app/api/v1/printers.py
+          grep -q '_PRIMARY_PROXY_BASE_URL = "http://127.0.0.1:8000"' backend/app/api/v1/printers.py
+          test "$(cat version.txt)" = '1.2.44'
+
+          git add -A
+          git commit -m 'chore: adapt FilaMan upstream 1.2.44'
+          git push --force-with-lease origin HEAD:sync/upstream-2026-08-22
