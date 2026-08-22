@@ -1,11 +1,10 @@
-name: Build localized image
+name: FilaMan Release Gate
 
 on:
-  workflow_run:
-    workflows:
-      - Localization CI
-    types:
-      - completed
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       tag:
@@ -17,16 +16,81 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: filaman-release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  backend:
+    name: Backend + migrations
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Sync locked dependencies
+        run: uv sync --frozen --extra dev
+      - name: Consumption and X2D regressions
+        run: |
+          uv run pytest tests/test_spool_service.py -q
+          uv run pytest \
+            tests/test_printers.py \
+            tests/test_x2d_external_slot_migration.py \
+            tests/test_managed_plugin_service.py \
+            tests/test_managed_bambuddy_release.py -q
+      - name: Validate Alembic topology
+        run: |
+          HEAD_COUNT="$(uv run alembic heads | grep -E '^[0-9a-zA-Z_]+ ' | wc -l)"
+          test "$HEAD_COUNT" -eq 1
+          uv run alembic heads
+      - name: SQLite migration upgrade
+        run: |
+          DB="$RUNNER_TEMP/release-gate.db"
+          rm -f "$DB"
+          DATABASE_URL="sqlite+aiosqlite:///$DB" uv run alembic upgrade head
+          test -f "$DB"
+      - name: Full backend suite
+        run: uv run pytest -q
+
+  frontend:
+    name: Frontend + localization
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Validate RU/UA parity
+        run: npm run check:i18n
+      - name: Type and Astro checks
+        run: npm run check
+      - name: Frontend tests
+        run: npm test
+      - name: Lint
+        run: npm run lint
+      - name: Production build
+        run: npm run build
+
   build:
+    name: Multi-arch GHCR image
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+      (github.event_name == 'push' && github.ref_name == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref_name == 'main')
+    needs: [backend, frontend]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - name: Select immutable image tag
         id: image
         shell: bash
@@ -43,7 +107,7 @@ jobs:
             echo "Unsupported image tag: ${tag}" >&2
             exit 1
           fi
-          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -51,7 +115,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - name: Build and push amd64 + arm64
+        id: docker
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
@@ -61,5 +127,8 @@ jobs:
             org.opencontainers.image.source=https://github.com/MikeFox303/filaman-system
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.image.outputs.tag }}
-      - name: Publish build summary
-        run: echo 'Image `ghcr.io/mikefox303/filaman-system:${{ steps.image.outputs.tag }}`' >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish immutable release summary
+        shell: bash
+        run: |
+          echo 'Image: `ghcr.io/mikefox303/filaman-system:${{ steps.image.outputs.tag }}@${{ steps.docker.outputs.digest }}`' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Source: `${{ github.sha }}`' >> "$GITHUB_STEP_SUMMARY"

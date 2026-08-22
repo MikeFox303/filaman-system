@@ -1,0 +1,215 @@
+name: Sync managed Bambuddy plugin
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-managed-bambuddy-plugin
+  cancel-in-progress: false
+
+env:
+  SYNC_BRANCH: sync/managed-bambuddy-plugin
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout FilaMan main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Checkout validated plugin fork
+        uses: actions/checkout@v4
+        with:
+          repository: MikeFox303/filaman-bambuddy-plugin
+          ref: main
+          path: plugin-src
+          fetch-depth: 0
+
+      - name: Compare managed and validated plugin versions
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="$(python - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('backend/app/services/managed_plugin_service.py').read_text()
+          match = re.search(r'BAMBUDDY_PLUGIN_VERSION = "([^"]+)"', text)
+          if not match:
+              raise SystemExit('managed plugin version not found')
+          print(match.group(1))
+          PY
+          )"
+          target="$(python - <<'PY'
+          import json
+          print(json.load(open('plugin-src/bambuddy/plugin.json'))['version'])
+          PY
+          )"
+          source_sha="$(git -C plugin-src rev-parse HEAD)"
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+          echo "target=${target}" >> "$GITHUB_OUTPUT"
+          echo "source_sha=${source_sha}" >> "$GITHUB_OUTPUT"
+          newer="$(python - "$current" "$target" <<'PY'
+          import sys
+          def v(value):
+              return tuple(int(x) for x in value.split('-', 1)[0].split('.'))
+          current, target = sys.argv[1:3]
+          if v(target) < v(current):
+              raise SystemExit(f'refusing managed plugin downgrade: {current} -> {target}')
+          print('true' if v(target) > v(current) else 'false')
+          PY
+          )"
+          echo "newer=${newer}" >> "$GITHUB_OUTPUT"
+
+      - name: Build deterministic managed package
+        id: package
+        if: steps.version.outputs.newer == 'true'
+        shell: bash
+        env:
+          TARGET_VERSION: ${{ steps.version.outputs.target }}
+          SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import os
+          import re
+          import zipfile
+
+          version = os.environ['TARGET_VERSION']
+          source_sha = os.environ['SOURCE_SHA']
+          source = Path('plugin-src/bambuddy')
+          manifest = json.loads((source / 'plugin.json').read_text(encoding='utf-8'))
+          if manifest.get('plugin_key') != 'bambuddy' or manifest.get('version') != version:
+              raise SystemExit('plugin manifest identity/version mismatch')
+
+          out_dir = Path('backend/managed_plugins')
+          out_dir.mkdir(parents=True, exist_ok=True)
+          out = out_dir / f'bambuddy-{version}.zip'
+          fixed = (2020, 1, 1, 0, 0, 0)
+          with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+              for path in sorted(p for p in source.rglob('*') if p.is_file()):
+                  if '__pycache__' in path.parts or path.suffix == '.pyc':
+                      continue
+                  arc = Path('bambuddy') / path.relative_to(source)
+                  info = zipfile.ZipInfo(arc.as_posix(), fixed)
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.external_attr = 0o100644 << 16
+                  zf.writestr(info, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+
+          digest = hashlib.sha256(out.read_bytes()).hexdigest()
+
+          service = Path('backend/app/services/managed_plugin_service.py')
+          text = service.read_text(encoding='utf-8')
+          text, n1 = re.subn(
+              r'BAMBUDDY_PLUGIN_VERSION = "[^"]+"',
+              f'BAMBUDDY_PLUGIN_VERSION = "{version}"',
+              text,
+              count=1,
+          )
+          text, n2 = re.subn(
+              r'BAMBUDDY_PLUGIN_SHA256 = "[0-9a-f]{64}"',
+              f'BAMBUDDY_PLUGIN_SHA256 = "{digest}"',
+              text,
+              count=1,
+          )
+          text, n3 = re.subn(
+              r'BAMBUDDY_PLUGIN_ASSET = Path\("/app/managed_plugins/bambuddy-[^"]+\.zip"\)',
+              f'BAMBUDDY_PLUGIN_ASSET = Path("/app/managed_plugins/bambuddy-{version}.zip")',
+              text,
+              count=1,
+          )
+          if (n1, n2, n3) != (1, 1, 1):
+              raise SystemExit(f'could not update managed plugin pins: {(n1, n2, n3)}')
+          service.write_text(text, encoding='utf-8')
+
+          for old in out_dir.glob('bambuddy-*.zip'):
+              if old != out:
+                  old.unlink()
+
+          provenance = {
+              'repository': 'MikeFox303/filaman-bambuddy-plugin',
+              'source_sha': source_sha,
+              'version': version,
+              'sha256': digest,
+          }
+          (out_dir / 'bambuddy-release.json').write_text(
+              json.dumps(provenance, indent=2) + '\n', encoding='utf-8'
+          )
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+              fh.write(f'sha256={digest}\n')
+          PY
+          git diff --check
+
+      - name: Install uv
+        if: steps.version.outputs.newer == 'true'
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Validate FilaMan and plugin compatibility
+        if: steps.version.outputs.newer == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd backend
+          uv sync --frozen --extra dev
+          uv run pytest \
+            tests/test_managed_bambuddy_release.py \
+            tests/test_managed_plugin_service.py \
+            tests/test_spool_service.py -q
+          cd ..
+          rm -rf backend/app/plugins/bambuddy
+          mkdir -p backend/app/plugins/bambuddy
+          cp -a plugin-src/bambuddy/. backend/app/plugins/bambuddy/
+          cd backend
+          PYTHONPATH="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/plugin-src:$GITHUB_WORKSPACE/backend" \
+            uv run pytest "$GITHUB_WORKSPACE/plugin-src/tests" -q
+          rm -rf app/plugins/bambuddy
+
+      - name: Commit staged managed plugin update
+        if: steps.version.outputs.newer == 'true'
+        shell: bash
+        env:
+          TARGET_VERSION: ${{ steps.version.outputs.target }}
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            backend/managed_plugins \
+            backend/app/services/managed_plugin_service.py \
+            backend/tests/test_managed_bambuddy_release.py
+          git commit -m "chore: stage managed Bambuddy plugin ${TARGET_VERSION}"
+
+      - name: Publish review PR
+        if: steps.version.outputs.newer == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_VERSION: ${{ steps.version.outputs.target }}
+          SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
+          PLUGIN_SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$SYNC_BRANCH" || true
+          git push --force-with-lease origin "HEAD:${SYNC_BRANCH}"
+          existing="$(gh pr list --head "$SYNC_BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+          body="Validated managed Bambuddy plugin update to ${TARGET_VERSION}. Source: MikeFox303/filaman-bambuddy-plugin@${SOURCE_SHA}. Deterministic ZIP SHA256: ${PLUGIN_SHA256}. Compatibility tests passed. Automatic merge is intentionally disabled because plugin updates can affect X2D/AMS/consumption behavior; preserve source_event_key idempotency, MissingGreenlet-safe writes, External Tray mapping and inventory_only."
+          if [[ -z "$existing" ]]; then
+            gh pr create --base main --head "$SYNC_BRANCH" --title "chore: managed Bambuddy plugin ${TARGET_VERSION}" --body "$body"
+          else
+            gh pr edit "$existing" --title "chore: managed Bambuddy plugin ${TARGET_VERSION}" --body "$body"
+          fi
