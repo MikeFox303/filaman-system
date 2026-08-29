@@ -1,0 +1,62 @@
+name: Integrate upstream 1.2.47
+
+on:
+  push:
+    branches:
+      - integration/upstream-1.2.47
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge maintained upstream core
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/Fire-Devils/filaman-system.git || true
+          git fetch upstream main
+          test "$(git show upstream/main:version.txt)" = "1.2.47"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git merge --no-edit upstream/main
+
+      - name: Reapply downstream localization layer
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs')
+          for (const [lang, values] of Object.entries({
+            ru: { frameTitle: 'Страница плагина', notFound: 'Эта страница плагина недоступна.' },
+            uk: { frameTitle: 'Сторінка плагіна', notFound: 'Ця сторінка плагіна недоступна.' },
+          })) {
+            const path = `frontend/src/i18n/${lang}.json`
+            const data = JSON.parse(fs.readFileSync(path, 'utf8'))
+            data.pluginPage = values
+            fs.writeFileSync(path, JSON.stringify(data, null, 2) + '\n')
+          }
+          const pkgPath = 'frontend/package.json'
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
+          pkg.scripts['check:i18n'] = 'node scripts/check-i18n.mjs'
+          fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n')
+          NODE
+
+      - name: Validate downstream translation parity
+        working-directory: frontend
+        run: node scripts/check-i18n.mjs
+
+      - name: Commit integrated staging branch
+        run: |
+          set -euo pipefail
+          git add frontend/src/i18n/ru.json frontend/src/i18n/uk.json frontend/package.json
+          if ! git diff --cached --quiet; then
+            git commit -m "i18n: reapply RU and UK layer on upstream 1.2.47"
+          fi
+          git push origin HEAD:integration/upstream-1.2.47
