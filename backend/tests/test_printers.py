@@ -1,13 +1,17 @@
-import httpx
 import pytest
-from fastapi import HTTPException
-from starlette.requests import Request
 from sqlalchemy import event
 from sqlalchemy.orm.attributes import set_committed_value
 from unittest.mock import AsyncMock, patch
 
-from app.api.v1 import printers as printers_api
+from app.api.v1.printers import _primary_proxy_url
 from app.models import Location, Printer, PrinterSlot
+
+
+class TestPrimaryProxyUrl:
+    def test_primary_proxy_url_uses_loopback(self):
+        assert _primary_proxy_url("/api/v1/devices/scale/weight") == (
+            "http://127.0.0.1:8001/api/v1/devices/scale/weight"
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -54,148 +58,6 @@ async def _create_location(db_session, name: str = "Shelf A") -> Location:
     await db_session.commit()
     await db_session.refresh(location)
     return location
-
-
-def _proxy_request(
-    url: str = "http://192.168.0.100:8000/api/v1/printers/3/driver/action?unexpected=1",
-    headers: dict[str, str] | None = None,
-) -> Request:
-    parsed = httpx.URL(url)
-    request_headers = {"host": parsed.netloc.decode()}
-    request_headers.update(headers or {})
-    return Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "scheme": parsed.scheme,
-            "path": parsed.path,
-            "raw_path": parsed.raw_path,
-            "query_string": parsed.query,
-            "headers": [
-                (key.encode("latin-1"), value.encode("latin-1"))
-                for key, value in request_headers.items()
-            ],
-            "server": (parsed.host, parsed.port),
-            "client": ("192.168.0.50", 50000),
-        }
-    )
-
-
-def _mock_async_client(*responses: httpx.Response) -> AsyncMock:
-    client = AsyncMock()
-    client.request = AsyncMock(side_effect=responses)
-    client.__aenter__ = AsyncMock(return_value=client)
-    client.__aexit__ = AsyncMock(return_value=False)
-    return client
-
-
-class TestPrimaryWorkerProxy:
-    @pytest.mark.asyncio
-    async def test_uses_loopback_url_and_forwards_required_headers(self):
-        request = _proxy_request(
-            headers={
-                "authorization": "Bearer token",
-                "cookie": "session=abc",
-                "x-csrf-token": "csrf-token",
-                "accept": "application/json",
-                "x-filaman-primary-hop": "2",
-            }
-        )
-        client = _mock_async_client(httpx.Response(200, json={"ok": True}))
-
-        with patch("app.api.v1.printers.httpx.AsyncClient", return_value=client):
-            result = await printers_api._proxy_to_primary(
-                request,
-                method="POST",
-                path="/api/v1/printers/3/driver/action",
-                json_body={"action": "assign_spool"},
-            )
-
-        assert result == {"ok": True}
-        method, url = client.request.await_args.args[:2]
-        assert method == "POST"
-        assert url == "http://127.0.0.1:8000/api/v1/printers/3/driver/action"
-        assert client.request.await_args.kwargs["params"] is None
-        assert client.request.await_args.kwargs["json"] == {"action": "assign_spool"}
-        assert client.request.await_args.kwargs["headers"] == {
-            "authorization": "Bearer token",
-            "cookie": "session=abc",
-            "x-csrf-token": "csrf-token",
-            "accept": "application/json",
-            "x-filaman-primary-hop": "3",
-        }
-
-    @pytest.mark.asyncio
-    async def test_forwards_only_explicit_query_params(self):
-        request = _proxy_request()
-        client = _mock_async_client(httpx.Response(200, json={"presets": []}))
-
-        with patch("app.api.v1.printers.httpx.AsyncClient", return_value=client):
-            await printers_api._proxy_to_primary(
-                request,
-                method="GET",
-                path="/api/v1/printers/3/driver/cloud-presets",
-                query_params={"model": "X2D", "group": "base"},
-            )
-
-        assert client.request.await_args.args[1] == (
-            "http://127.0.0.1:8000/api/v1/printers/3/driver/cloud-presets"
-        )
-        assert client.request.await_args.kwargs["params"] == {"model": "X2D", "group": "base"}
-
-    @pytest.mark.asyncio
-    async def test_retries_primary_required_and_returns_primary_payload(self):
-        request = _proxy_request(headers={"x-filaman-primary-hop": "0"})
-        client = _mock_async_client(
-            httpx.Response(503, json={"detail": {"code": "primary_worker_required"}}),
-            httpx.Response(200, json={"connected": True}),
-        )
-
-        with patch("app.api.v1.printers.httpx.AsyncClient", return_value=client):
-            result = await printers_api._proxy_to_primary(
-                request,
-                method="POST",
-                path="/api/v1/printers/3/driver/action",
-            )
-
-        assert result == {"connected": True}
-        assert client.request.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_proxies_primary_http_error(self):
-        request = _proxy_request()
-        client = _mock_async_client(
-            httpx.Response(400, json={"detail": {"code": "action_failed", "message": "bad action"}})
-        )
-
-        with patch("app.api.v1.printers.httpx.AsyncClient", return_value=client):
-            with pytest.raises(HTTPException) as exc_info:
-                await printers_api._proxy_to_primary(
-                    request,
-                    method="POST",
-                    path="/api/v1/printers/3/driver/action",
-                )
-
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail == {"code": "action_failed", "message": "bad action"}
-
-    @pytest.mark.asyncio
-    async def test_stops_at_max_hop_before_creating_request(self):
-        request = _proxy_request(
-            headers={"x-filaman-primary-hop": str(printers_api._PRIMARY_PROXY_MAX_HOPS)}
-        )
-
-        with patch("app.api.v1.printers.httpx.AsyncClient") as async_client:
-            with pytest.raises(HTTPException) as exc_info:
-                await printers_api._proxy_to_primary(
-                    request,
-                    method="POST",
-                    path="/api/v1/printers/3/driver/action",
-                )
-
-        assert exc_info.value.status_code == 503
-        assert exc_info.value.detail["code"] == "primary_proxy_failed"
-        async_client.assert_not_called()
 
 
 class TestPrinterCRUD:
@@ -443,3 +305,138 @@ class TestDriverActionProxy:
 
         assert response.status_code == 502
         assert response.json()["detail"]["code"] == "primary_proxy_invalid_response"
+
+
+class TestDriverLifecycleWorkerRouting:
+    """Drivers live on the primary worker, so routes touching them must hand over.
+
+    Every test here runs with _is_primary_worker() returning False, which is the
+    state of three out of four gunicorn workers and the reason the driver work
+    used to be dropped silently.
+    """
+
+    @pytest.mark.asyncio
+    async def test_driver_config_change_is_handed_to_the_primary_worker(
+        self, auth_client, db_session, mock_plugin_manager
+    ):
+        client, csrf_token = auth_client
+        printer = await _create_printer(db_session, name="Bambu")
+
+        forwarded = {
+            "id": printer.id,
+            "name": "Bambu",
+            "location_id": None,
+            "is_active": True,
+            "driver_key": printer.driver_key,
+            "custom_fields": None,
+        }
+
+        with patch("app.api.v1.printers._is_primary_worker", return_value=False), patch(
+            "app.api.v1.printers._proxy_to_primary",
+            new=AsyncMock(return_value=forwarded),
+        ) as proxy:
+            response = await client.patch(
+                f"/api/v1/printers/{printer.id}",
+                json={"driver_config": {"host": "192.168.0.9"}},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert response.status_code == 200
+        proxy.assert_awaited_once()
+        assert proxy.await_args.kwargs["method"] == "PATCH"
+        assert proxy.await_args.kwargs["path"] == f"/api/v1/printers/{printer.id}"
+
+        # The handover happens before the commit, so this worker wrote nothing
+        # and never pretended to restart a driver it does not hold.
+        await db_session.refresh(printer)
+        assert printer.driver_config is None
+        mock_plugin_manager.start_printer.assert_not_awaited()
+        mock_plugin_manager.stop_printer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rename_is_handled_locally(self, auth_client, db_session):
+        client, csrf_token = auth_client
+        printer = await _create_printer(db_session, name="Old Name")
+
+        with patch("app.api.v1.printers._is_primary_worker", return_value=False), patch(
+            "app.api.v1.printers._proxy_to_primary", new=AsyncMock()
+        ) as proxy:
+            response = await client.patch(
+                f"/api/v1/printers/{printer.id}",
+                json={"name": "New Name"},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["name"] == "New Name"
+        # A field that cannot affect the driver must not cost an extra hop.
+        proxy.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_primary_worker_restarts_the_driver_itself(
+        self, auth_client, db_session, mock_plugin_manager
+    ):
+        client, csrf_token = auth_client
+        printer = await _create_printer(db_session, name="Bambu")
+
+        with patch("app.api.v1.printers._is_primary_worker", return_value=True), patch(
+            "app.api.v1.printers._proxy_to_primary", new=AsyncMock()
+        ) as proxy:
+            response = await client.patch(
+                f"/api/v1/printers/{printer.id}",
+                json={"driver_config": {"host": "192.168.0.9"}},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert response.status_code == 200
+        proxy.assert_not_awaited()
+        mock_plugin_manager.stop_printer.assert_awaited_once()
+        mock_plugin_manager.start_printer.assert_awaited_once()
+        await db_session.refresh(printer)
+        assert printer.driver_config == {"host": "192.168.0.9"}
+
+    @pytest.mark.asyncio
+    async def test_delete_hands_the_stop_over_but_still_soft_deletes(
+        self, auth_client, db_session, mock_plugin_manager
+    ):
+        client, csrf_token = auth_client
+        printer = await _create_printer(db_session, name="Delete Me")
+
+        with patch("app.api.v1.printers._is_primary_worker", return_value=False), patch(
+            "app.api.v1.printers._proxy_to_primary", new=AsyncMock(return_value=None)
+        ) as proxy:
+            response = await client.delete(
+                f"/api/v1/printers/{printer.id}",
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert response.status_code == 204
+        proxy.assert_awaited_once()
+        assert proxy.await_args.kwargs["path"] == (
+            f"/api/v1/printers/{printer.id}/driver/stop"
+        )
+        # The soft-delete is this worker's own job and stays local.
+        await db_session.refresh(printer)
+        assert printer.deleted_at is not None
+
+    @pytest.mark.asyncio
+    async def test_delete_survives_an_unreachable_primary_worker(
+        self, auth_client, db_session
+    ):
+        client, csrf_token = auth_client
+        printer = await _create_printer(db_session, name="Delete Me Too")
+
+        with patch("app.api.v1.printers._is_primary_worker", return_value=False), patch(
+            "app.api.v1.printers._proxy_to_primary",
+            new=AsyncMock(side_effect=RuntimeError("primary unreachable")),
+        ):
+            response = await client.delete(
+                f"/api/v1/printers/{printer.id}",
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        # Stopping the driver is best effort; losing the primary must not keep
+        # the user from deleting a printer.
+        assert response.status_code == 204
+        await db_session.refresh(printer)
+        assert printer.deleted_at is not None

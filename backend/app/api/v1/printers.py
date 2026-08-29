@@ -1,6 +1,7 @@
 import logging
 import inspect
 import contextlib
+import os
 from typing import Any
 
 import httpx
@@ -30,7 +31,18 @@ router = APIRouter(prefix="/printers", tags=["printers"])
 _PRIMARY_PROXY_HEADER = "x-filaman-primary-hop"
 _PRIMARY_PROXY_MAX_HOPS = 12
 _PRIMARY_PROXY_RETRIES = 8
-_PRIMARY_PROXY_BASE_URL = "http://127.0.0.1:8000"
+_DEFAULT_GUNICORN_URL = os.environ.get("FILAMAN_GUNICORN_URL", "http://127.0.0.1:8001")
+
+
+def _primary_proxy_url(path: str) -> str:
+    base = _DEFAULT_GUNICORN_URL.rstrip("/")
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path}"
+
+# Changing one of these restarts the printer's driver, and drivers live on the
+# primary worker only.  A request touching them has to be handled there.
+_DRIVER_LIFECYCLE_FIELDS = frozenset({"driver_key", "driver_config", "is_active"})
 
 
 def _is_primary_worker() -> bool:
@@ -73,7 +85,6 @@ async def _proxy_to_primary(
     method: str,
     path: str,
     json_body: dict[str, Any] | None = None,
-    query_params: dict[str, Any] | None = None,
 ) -> Any:
     hop_header = request.headers.get(_PRIMARY_PROXY_HEADER, "0")
     hop = int(hop_header) if hop_header.isdigit() else 0
@@ -86,17 +97,18 @@ async def _proxy_to_primary(
             },
         )
 
-    # Route through the container-local nginx endpoint rather than the
-    # externally supplied Host header, then rely on retries to hit primary.
-    url = f"{_PRIMARY_PROXY_BASE_URL}{path}"
+    target = _primary_proxy_url(path)
+    # Hit Gunicorn on loopback (not request.url / public Host) and rely on the
+    # retry loop to eventually reach the primary worker.
+    url = target
     headers = _forward_headers(request, hop)
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for _ in range(_PRIMARY_PROXY_RETRIES):
+    for _ in range(_PRIMARY_PROXY_RETRIES):
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.request(
                 method,
                 url,
-                params=query_params,
+                params=request.query_params,
                 headers=headers,
                 json=json_body,
             )
@@ -237,6 +249,7 @@ async def list_printers(
 @router.post("", response_model=PrinterResponse, status_code=status.HTTP_201_CREATED)
 async def create_printer(
     data: PrinterCreate,
+    request: Request,
     db: DBSession,
     principal=RequirePermission("printers:create"),
 ):
@@ -255,13 +268,17 @@ async def create_printer(
     await db.commit()
     await db.refresh(printer)
 
-    # Auto-start driver if printer is active (default)
+    # Auto-start driver if printer is active (default).  Only the primary worker
+    # holds drivers, so anywhere else the start has to be handed over.
     if printer.is_active and printer.driver_key:
-        started = await plugin_manager.start_printer(printer)
-        if not started:
-            logger.warning(
-                f"Driver {printer.driver_key} could not be started for new printer {printer.id}"
-            )
+        if not _is_primary_worker():
+            await _driver_lifecycle_via_primary(request, printer.id, "start")
+        else:
+            started = await plugin_manager.start_printer(printer)
+            if not started:
+                logger.warning(
+                    f"Driver {printer.driver_key} could not be started for new printer {printer.id}"
+                )
 
     return printer
 
@@ -380,9 +397,24 @@ async def get_printer(
 async def update_printer(
     printer_id: int,
     data: PrinterUpdate,
+    request: Request,
     db: DBSession,
     principal=RequirePermission("printers:update"),
 ):
+    updates = data.model_dump(exclude_unset=True)
+
+    # The driver restart below is the point of such a change, so the whole
+    # request goes to the worker that can actually perform it, before anything
+    # is written.  That keeps exactly one worker applying the update.
+    if (_DRIVER_LIFECYCLE_FIELDS & updates.keys()) and not _is_primary_worker():
+        payload = await _proxy_to_primary(
+            request,
+            method="PATCH",
+            path=f"/api/v1/printers/{printer_id}",
+            json_body=data.model_dump(exclude_unset=True, mode="json"),
+        )
+        return PrinterResponse.model_validate(payload)
+
     result = await db.execute(
         select(Printer).where(Printer.id == printer_id, Printer.deleted_at.is_(None))
     )
@@ -394,7 +426,6 @@ async def update_printer(
             detail={"code": "not_found", "message": "Printer not found"},
         )
 
-    updates = data.model_dump(exclude_unset=True)
     driver_changed = "driver_key" in updates or "driver_config" in updates
     active_changed = (
         "is_active" in updates and updates["is_active"] != printer.is_active
@@ -424,6 +455,7 @@ async def update_printer(
 @router.delete("/{printer_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_printer(
     printer_id: int,
+    request: Request,
     db: DBSession,
     principal=RequirePermission("printers:delete"),
     delete_params: bool = Query(
@@ -445,8 +477,12 @@ async def delete_printer(
             detail={"code": "not_found", "message": "Printer not found"},
         )
 
-    # Stop driver before soft-delete
-    await plugin_manager.stop_printer(printer_id)
+    # Stop driver before soft-delete.  Only the primary worker holds drivers, so
+    # anywhere else the stop has to be handed over.
+    if not _is_primary_worker():
+        await _driver_lifecycle_via_primary(request, printer_id, "stop")
+    else:
+        await plugin_manager.stop_printer(printer_id)
 
     # Optionally hard-delete calibration data
     if delete_params:
@@ -637,6 +673,28 @@ async def pick_bambuddy_driver(db: DBSession) -> tuple[int, Any]:
     )
 
 
+async def _driver_lifecycle_via_primary(
+    request: Request, printer_id: int, action: str
+) -> None:
+    """Ask the primary worker to start or stop a driver, best effort.
+
+    Drivers live on the primary worker, so a request served anywhere else cannot
+    reach them.  The caller has already committed its own database work, and
+    failing to reach the primary must not undo that, so this only logs.
+    """
+    try:
+        await _proxy_to_primary(
+            request,
+            method="POST",
+            path=f"/api/v1/printers/{printer_id}/driver/{action}",
+        )
+    except Exception as exc:
+        logger.warning(
+            f"Could not {action} the driver for printer {printer_id} on the "
+            f"primary worker: {exc}"
+        )
+
+
 async def _invoke_driver_method(driver: Any, method_name: str, **kwargs: Any) -> Any:
     method = getattr(driver, method_name, None)
     if not callable(method):
@@ -798,16 +856,16 @@ async def driver_profile_coverage(
 ):
     """Read-only per-model profile resolution for the slicer profile picker."""
     if not _is_primary_worker():
-        query_params = {
-            key: value
-            for key, value in {"spool_id": spool_id, "filament_id": filament_id}.items()
-            if value is not None
-        }
+        qs_parts = []
+        if spool_id is not None:
+            qs_parts.append(f"spool_id={spool_id}")
+        if filament_id is not None:
+            qs_parts.append(f"filament_id={filament_id}")
+        qs = ("?" + "&".join(qs_parts)) if qs_parts else ""
         return await _proxy_to_primary(
             request,
             method="GET",
-            path=f"/api/v1/printers/{printer_id}/driver/profile-coverage",
-            query_params=query_params,
+            path=f"/api/v1/printers/{printer_id}/driver/profile-coverage{qs}",
         )
 
     driver = plugin_manager.drivers.get(printer_id)
@@ -849,7 +907,6 @@ async def driver_health(
             request,
             method="GET",
             path=f"/api/v1/printers/{printer_id}/driver/health",
-            query_params={"refresh": refresh},
         )
         if isinstance(payload, dict):
             return payload
@@ -908,18 +965,18 @@ async def driver_cloud_presets(
     Response shape: {"presets": [{code, name, displayName, isCustom}], "count": N}.
     """
     if not _is_primary_worker():
-        query_params = {}
+        qs_parts = []
         if refresh:
-            query_params["refresh"] = 1
+            qs_parts.append("refresh=1")
         if model:
-            query_params["model"] = model
+            qs_parts.append(f"model={model}")
         if group:
-            query_params["group"] = group
+            qs_parts.append(f"group={group}")
+        qs = ("?" + "&".join(qs_parts)) if qs_parts else ""
         payload = await _proxy_to_primary(
             request,
             method="GET",
-            path=f"/api/v1/printers/{printer_id}/driver/cloud-presets",
-            query_params=query_params,
+            path=f"/api/v1/printers/{printer_id}/driver/cloud-presets{qs}",
         )
         if isinstance(payload, dict):
             return payload
@@ -987,10 +1044,20 @@ async def reconnect_all_printers(
 @router.get("/{printer_id}/driver/debug")
 async def driver_debug_log(
     printer_id: int,
+    request: Request,
     since: str | None = Query(None),
     db: DBSession = None,
     principal: PrincipalDep = None,
 ):
+    # The debug log lives inside the driver instance, so only the primary worker
+    # can answer.  Query parameters travel with the forwarded request.
+    if not _is_primary_worker():
+        return await _proxy_to_primary(
+            request,
+            method="GET",
+            path=f"/api/v1/printers/{printer_id}/driver/debug",
+        )
+
     driver = plugin_manager.drivers.get(printer_id)
     if not driver:
         raise HTTPException(
