@@ -30,7 +30,6 @@ router = APIRouter(prefix="/printers", tags=["printers"])
 _PRIMARY_PROXY_HEADER = "x-filaman-primary-hop"
 _PRIMARY_PROXY_MAX_HOPS = 12
 _PRIMARY_PROXY_RETRIES = 8
-_PRIMARY_PROXY_BASE_URL = "http://127.0.0.1:8000"
 
 
 def _is_primary_worker() -> bool:
@@ -73,7 +72,6 @@ async def _proxy_to_primary(
     method: str,
     path: str,
     json_body: dict[str, Any] | None = None,
-    query_params: dict[str, Any] | None = None,
 ) -> Any:
     hop_header = request.headers.get(_PRIMARY_PROXY_HEADER, "0")
     hop = int(hop_header) if hop_header.isdigit() else 0
@@ -86,9 +84,10 @@ async def _proxy_to_primary(
             },
         )
 
-    # Route through the container-local nginx endpoint rather than the
-    # externally supplied Host header, then rely on retries to hit primary.
-    url = f"{_PRIMARY_PROXY_BASE_URL}{path}"
+    target = request.url.replace(path=path, query="")
+    # Route through same service endpoint and rely on retry loop to
+    # eventually hit the primary worker.
+    url = str(target)
     headers = _forward_headers(request, hop)
 
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -96,7 +95,7 @@ async def _proxy_to_primary(
             response = await client.request(
                 method,
                 url,
-                params=query_params,
+                params=request.query_params,
                 headers=headers,
                 json=json_body,
             )
@@ -118,19 +117,6 @@ async def _proxy_to_primary(
                     detail={
                         "code": "proxy_failed",
                         "message": response.text,
-                    },
-                )
-
-            if payload is None:
-                # response.json() above swallows decode errors, so a successful
-                # status code can still leave payload unset (empty/non-JSON body).
-                # Surface that as a structured error instead of letting callers
-                # crash on model_validate(None).
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail={
-                        "code": "primary_proxy_invalid_response",
-                        "message": "Primary worker returned an invalid response",
                     },
                 )
 
@@ -798,16 +784,16 @@ async def driver_profile_coverage(
 ):
     """Read-only per-model profile resolution for the slicer profile picker."""
     if not _is_primary_worker():
-        query_params = {
-            key: value
-            for key, value in {"spool_id": spool_id, "filament_id": filament_id}.items()
-            if value is not None
-        }
+        qs_parts = []
+        if spool_id is not None:
+            qs_parts.append(f"spool_id={spool_id}")
+        if filament_id is not None:
+            qs_parts.append(f"filament_id={filament_id}")
+        qs = ("?" + "&".join(qs_parts)) if qs_parts else ""
         return await _proxy_to_primary(
             request,
             method="GET",
-            path=f"/api/v1/printers/{printer_id}/driver/profile-coverage",
-            query_params=query_params,
+            path=f"/api/v1/printers/{printer_id}/driver/profile-coverage{qs}",
         )
 
     driver = plugin_manager.drivers.get(printer_id)
@@ -849,7 +835,6 @@ async def driver_health(
             request,
             method="GET",
             path=f"/api/v1/printers/{printer_id}/driver/health",
-            query_params={"refresh": refresh},
         )
         if isinstance(payload, dict):
             return payload
@@ -908,18 +893,18 @@ async def driver_cloud_presets(
     Response shape: {"presets": [{code, name, displayName, isCustom}], "count": N}.
     """
     if not _is_primary_worker():
-        query_params = {}
+        qs_parts = []
         if refresh:
-            query_params["refresh"] = 1
+            qs_parts.append("refresh=1")
         if model:
-            query_params["model"] = model
+            qs_parts.append(f"model={model}")
         if group:
-            query_params["group"] = group
+            qs_parts.append(f"group={group}")
+        qs = ("?" + "&".join(qs_parts)) if qs_parts else ""
         payload = await _proxy_to_primary(
             request,
             method="GET",
-            path=f"/api/v1/printers/{printer_id}/driver/cloud-presets",
-            query_params=query_params,
+            path=f"/api/v1/printers/{printer_id}/driver/cloud-presets{qs}",
         )
         if isinstance(payload, dict):
             return payload
