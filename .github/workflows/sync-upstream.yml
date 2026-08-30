@@ -73,7 +73,7 @@ jobs:
         if: steps.merge.outputs.conflict == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
           UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
         run: |
           set -euo pipefail
@@ -164,7 +164,7 @@ jobs:
         if: steps.merge.outputs.changed == 'true' && steps.merge.outputs.conflict != 'true' && steps.merge.outputs.sensitive == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
           UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
         run: |
           set -euo pipefail
