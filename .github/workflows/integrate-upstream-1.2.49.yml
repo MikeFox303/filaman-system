@@ -46,9 +46,6 @@ jobs:
                   git checkout --theirs -- "$file"
                   git add -- "$file"
                   ;;
-                .github/workflows/discord-release.yml__bak|.github/workflows/docker-build.yml__bak)
-                  git rm -f -- "$file" || true
-                  ;;
                 *)
                   echo "Unexpected conflict: $file" >&2
                   unexpected=1
@@ -60,6 +57,14 @@ jobs:
               exit 1
             fi
           fi
+
+          # GitHub's default Actions token is intentionally not allowed to create
+          # or update workflow files. Keep the pre-merge release automation in this
+          # staging commit; the exact upstream release workflow is imported later
+          # as a separate reviewed GitHub commit.
+          git rm -f --ignore-unmatch .github/workflows/release.yml
+          git checkout ORIG_HEAD -- .gitea/workflows/main.yml
+          git add .gitea/workflows/main.yml
 
       - name: Reapply downstream language support
         shell: bash
