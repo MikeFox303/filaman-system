@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout staging branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -34,7 +34,7 @@ jobs:
         run: node scripts/apply-upstream-1.2.49-i18n.mjs
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
 
@@ -58,7 +58,7 @@ jobs:
           uv run pytest -q
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -69,12 +69,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cp ../version.txt ./version.txt
           npm ci
           npm run check:i18n
           npm run check
           npm test
           npm run lint
           npm run build
+          rm -f ./version.txt
 
       - name: Protected downstream invariants
         shell: bash
@@ -87,7 +89,7 @@ jobs:
           python -m json.tool backend/managed_plugins/bambuddy-release.json >/dev/null
           grep -q '1000' backend/alembic/versions/normalize_x2d_external_slots.py
           grep -q '1001' backend/alembic/versions/normalize_x2d_external_slots.py
-          grep -q '127.0.0.1:8000' backend/app/api/v1/printers.py
+          grep -q '127.0.0.1:8001' backend/app/api/v1/printers.py
           grep -q 'primary_proxy_invalid_response' backend/app/api/v1/printers.py
           grep -q 'Literal\["en", "de", "ru", "uk"\]' backend/app/core/language.py
           grep -q "import ru from '../i18n/ru.json'" frontend/src/lib/i18n.ts
