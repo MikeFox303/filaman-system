@@ -67,7 +67,13 @@ const translations = {
   },
 };
 
-function setPath(target, dottedKey, value) {
+const removedKeys = [
+  'labelPrint.pngUnavailableInSheetMode',
+  'labelPrint.printHelpBrave',
+  'labelPrint.printHelpFirefox',
+];
+
+function resolveParent(target, dottedKey) {
   const parts = dottedKey.split('.');
   const leaf = parts.pop();
   let node = target;
@@ -75,14 +81,25 @@ function setPath(target, dottedKey, value) {
     if (!node[part] || typeof node[part] !== 'object' || Array.isArray(node[part])) node[part] = {};
     node = node[part];
   }
+  return [node, leaf];
+}
+
+function setPath(target, dottedKey, value) {
+  const [node, leaf] = resolveParent(target, dottedKey);
   node[leaf] = value;
+}
+
+function deletePath(target, dottedKey) {
+  const [node, leaf] = resolveParent(target, dottedKey);
+  delete node[leaf];
 }
 
 for (const [lang, entries] of Object.entries(translations)) {
   const path = `frontend/src/i18n/${lang}.json`;
   const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+  for (const key of removedKeys) deletePath(data, key);
   for (const [key, value] of Object.entries(entries)) setPath(data, key, value);
   fs.writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`);
 }
 
-console.log(`Applied ${Object.keys(translations.ru).length} RU and ${Object.keys(translations.uk).length} UK translations.`);
+console.log(`Aligned RU/UK catalogs and applied ${Object.keys(translations.ru).length} translations per language.`);
