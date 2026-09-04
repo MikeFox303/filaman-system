@@ -63,6 +63,10 @@ function visibleText(text) {
     .replace(/\{[^}]+\}/g, '')
 }
 
+function hasLanguageContent(text) {
+  return /[\p{L}\p{N}]/u.test(text)
+}
+
 async function dictionary(language) {
   const file = fileURLToPath(new URL(`${language}.json`, root))
   return flatten(JSON.parse(await readFile(file, 'utf8')))
@@ -80,7 +84,7 @@ for (const language of languages) {
       console.error(`${language}: placeholder mismatch for ${key}`)
       failed = true
     }
-    if ((language === 'ru' || language === 'uk') && target === source && !untranslatedAllowlist.has(key)) {
+    if ((language === 'ru' || language === 'uk') && target === source && hasLanguageContent(source) && !untranslatedAllowlist.has(key)) {
       console.error(`${language}: untranslated value for ${key}`)
       failed = true
     }
