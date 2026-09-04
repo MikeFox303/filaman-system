@@ -1,0 +1,137 @@
+name: Integrate upstream 1.2.49
+
+on:
+  push:
+    branches:
+      - integration/upstream-1.2.49
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout integration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge exact upstream 1.2.49
+        shell: bash
+        env:
+          UPSTREAM_SHA: 513c85baf7d66954405fd241cdede41f97a8f3b2
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git remote add upstream https://github.com/Fire-Devils/filaman-system.git || true
+          git fetch upstream main --tags
+          test "$(git show "${UPSTREAM_SHA}:version.txt" | tr -d '\r\n')" = "1.2.49"
+
+          set +e
+          git merge --no-commit --no-ff "$UPSTREAM_SHA"
+          merge_rc=$?
+          set -e
+
+          if [[ "$merge_rc" -ne 0 ]]; then
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            printf 'Merge conflicts:\n%s\n' "${conflicts[*]}"
+            unexpected=0
+            for file in "${conflicts[@]}"; do
+              case "$file" in
+                frontend/package.json|frontend/src/i18n/en.json|frontend/src/i18n/de.json|frontend/src/lib/i18n.ts)
+                  git checkout --theirs -- "$file"
+                  git add -- "$file"
+                  ;;
+                .github/workflows/discord-release.yml__bak|.github/workflows/docker-build.yml__bak)
+                  git rm -f -- "$file" || true
+                  ;;
+                *)
+                  echo "Unexpected conflict: $file" >&2
+                  unexpected=1
+                  ;;
+              esac
+            done
+            if [[ "$unexpected" -ne 0 ]] || [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
+              echo 'Refusing to guess at unexpected upstream conflicts.' >&2
+              exit 1
+            fi
+          fi
+
+      - name: Reapply downstream language support
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs')
+
+          const packagePath = 'frontend/package.json'
+          const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
+          pkg.scripts['check:i18n'] = 'node scripts/check-i18n.mjs'
+          fs.writeFileSync(packagePath, JSON.stringify(pkg, null, 2) + '\n')
+
+          const i18nPath = 'frontend/src/lib/i18n.ts'
+          let source = fs.readFileSync(i18nPath, 'utf8')
+          if (!source.includes("import ru from '../i18n/ru.json'")) {
+            source = source.replace(
+              "import de from '../i18n/de.json'\n",
+              "import de from '../i18n/de.json'\nimport ru from '../i18n/ru.json'\nimport uk from '../i18n/uk.json'\n",
+            )
+          }
+          source = source.replace(
+            /const dictionaries: Record<string, Dict> = \{ en, de(?:, ru, uk)? \}/,
+            'const dictionaries: Record<string, Dict> = { en, de, ru, uk }',
+          )
+          fs.writeFileSync(i18nPath, source)
+
+          for (const lang of ['en', 'de']) {
+            const path = `frontend/src/i18n/${lang}.json`
+            const data = JSON.parse(fs.readFileSync(path, 'utf8'))
+            data.settings.langRu = 'Русский'
+            data.settings.langUk = 'Українська'
+            fs.writeFileSync(path, JSON.stringify(data, null, 2) + '\n')
+          }
+          NODE
+
+      - name: Record new translation keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs')
+
+          function flatten(value, prefix = '', out = {}) {
+            for (const [key, child] of Object.entries(value)) {
+              const path = prefix ? `${prefix}.${key}` : key
+              if (typeof child === 'string') out[path] = child
+              else if (child && typeof child === 'object' && !Array.isArray(child)) flatten(child, path, out)
+            }
+            return out
+          }
+
+          const en = flatten(JSON.parse(fs.readFileSync('frontend/src/i18n/en.json', 'utf8')))
+          const report = { upstream: '1.2.49', ru: {}, uk: {} }
+          for (const lang of ['ru', 'uk']) {
+            const translated = flatten(JSON.parse(fs.readFileSync(`frontend/src/i18n/${lang}.json`, 'utf8')))
+            for (const [key, value] of Object.entries(en)) {
+              if (!(key in translated)) report[lang][key] = value
+            }
+          }
+          fs.writeFileSync('docs/UPSTREAM_1_2_49_I18N_MISSING.json', JSON.stringify(report, null, 2) + '\n')
+          console.log(`RU missing: ${Object.keys(report.ru).length}`)
+          console.log(`UK missing: ${Object.keys(report.uk).length}`)
+          NODE
+
+      - name: Commit staged upstream merge
+        shell: bash
+        env:
+          UPSTREAM_SHA: 513c85baf7d66954405fd241cdede41f97a8f3b2
+        run: |
+          set -euo pipefail
+          git add frontend/package.json frontend/src/lib/i18n.ts frontend/src/i18n/en.json frontend/src/i18n/de.json docs/UPSTREAM_1_2_49_I18N_MISSING.json
+          git diff --cached --check
+          git commit -m "chore: stage upstream FilaMan 1.2.49 (${UPSTREAM_SHA})"
+          git push origin HEAD:integration/upstream-1.2.49
