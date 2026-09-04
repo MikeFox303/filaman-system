@@ -1,4 +1,4 @@
-name: Integrate upstream 1.2.49
+name: Validate localized upstream 1.2.49 staging
 
 on:
   push:
@@ -9,134 +9,105 @@ permissions:
   contents: write
 
 jobs:
-  integrate:
+  validate:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout integration branch
+      - name: Checkout staging branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Merge exact upstream 1.2.49
+      - name: Verify exact upstream baseline
         shell: bash
         env:
           UPSTREAM_SHA: 513c85baf7d66954405fd241cdede41f97a8f3b2
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/Fire-Devils/filaman-system.git || true
+          git fetch upstream main --tags
+          git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD
+          test "$(cat version.txt | tr -d '\r\n')" = "1.2.49"
+
+      - name: Apply RU and UK translations
+        run: node scripts/apply-upstream-1.2.49-i18n.mjs
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Backend regression gate
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen --extra dev
+          uv run pytest tests/test_spool_service.py -q
+          uv run pytest \
+            tests/test_spools.py \
+            tests/test_printers.py \
+            tests/test_x2d_external_slot_migration.py \
+            tests/test_managed_plugin_service.py \
+            tests/test_managed_bambuddy_release.py -q
+          test "$(uv run alembic heads | grep -Ec '^[0-9a-zA-Z_]+ ')" -eq 1
+          db="$RUNNER_TEMP/upstream-1.2.49.db"
+          rm -f "$db"
+          DATABASE_URL="sqlite+aiosqlite:///$db" uv run alembic upgrade head
+          uv run pytest -q
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Localization and frontend gate
+        working-directory: frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run check:i18n
+          npm run check
+          npm test
+          npm run lint
+          npm run build
+
+      - name: Protected downstream invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          grep -Rqs 'source_event_key' backend/app backend/alembic backend/tests
+          grep -q 'BAMBUDDY_PLUGIN_VERSION' backend/app/services/managed_plugin_service.py
+          test "$(find backend/managed_plugins -maxdepth 1 -type f -name 'bambuddy-*.zip' | wc -l)" -eq 1
+          python -m json.tool backend/managed_plugins/bambuddy-release.json >/dev/null
+          grep -q '1000' backend/alembic/versions/normalize_x2d_external_slots.py
+          grep -q '1001' backend/alembic/versions/normalize_x2d_external_slots.py
+          grep -q '127.0.0.1:8000' backend/app/api/v1/printers.py
+          grep -q 'primary_proxy_invalid_response' backend/app/api/v1/printers.py
+          grep -q 'Literal\["en", "de", "ru", "uk"\]' backend/app/core/language.py
+          grep -q "import ru from '../i18n/ru.json'" frontend/src/lib/i18n.ts
+          grep -q "import uk from '../i18n/uk.json'" frontend/src/lib/i18n.ts
+          grep -q 'data-i18n-aria-label' frontend/src/lib/i18n.ts
+          python -m json.tool frontend/src/i18n/en.json >/dev/null
+          python -m json.tool frontend/src/i18n/de.json >/dev/null
+          python -m json.tool frontend/src/i18n/ru.json >/dev/null
+          python -m json.tool frontend/src/i18n/uk.json >/dev/null
+
+      - name: Commit validated translations
+        shell: bash
         run: |
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git remote add upstream https://github.com/Fire-Devils/filaman-system.git || true
-          git fetch upstream main --tags
-          test "$(git show "${UPSTREAM_SHA}:version.txt" | tr -d '\r\n')" = "1.2.49"
-
-          set +e
-          git merge --no-commit --no-ff "$UPSTREAM_SHA"
-          merge_rc=$?
-          set -e
-
-          if [[ "$merge_rc" -ne 0 ]]; then
-            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
-            printf 'Merge conflicts:\n%s\n' "${conflicts[*]}"
-            unexpected=0
-            for file in "${conflicts[@]}"; do
-              case "$file" in
-                frontend/package.json|frontend/src/i18n/en.json|frontend/src/i18n/de.json|frontend/src/lib/i18n.ts)
-                  git checkout --theirs -- "$file"
-                  git add -- "$file"
-                  ;;
-                *)
-                  echo "Unexpected conflict: $file" >&2
-                  unexpected=1
-                  ;;
-              esac
-            done
-            if [[ "$unexpected" -ne 0 ]] || [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
-              echo 'Refusing to guess at unexpected upstream conflicts.' >&2
-              exit 1
-            fi
+          git add frontend/src/i18n/ru.json frontend/src/i18n/uk.json
+          if git diff --cached --quiet; then
+            echo 'Translations already applied.'
+            exit 0
           fi
-
-          # GitHub's default Actions token is intentionally not allowed to create
-          # or update workflow files. Keep the pre-merge release automation in this
-          # staging commit; the exact upstream release workflow is imported later
-          # as a separate reviewed GitHub commit.
-          git rm -f --ignore-unmatch .github/workflows/release.yml
-          git checkout ORIG_HEAD -- .gitea/workflows/main.yml
-          git add .gitea/workflows/main.yml
-
-      - name: Reapply downstream language support
-        shell: bash
-        run: |
-          set -euo pipefail
-          node <<'NODE'
-          const fs = require('fs')
-
-          const packagePath = 'frontend/package.json'
-          const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
-          pkg.scripts['check:i18n'] = 'node scripts/check-i18n.mjs'
-          fs.writeFileSync(packagePath, JSON.stringify(pkg, null, 2) + '\n')
-
-          const i18nPath = 'frontend/src/lib/i18n.ts'
-          let source = fs.readFileSync(i18nPath, 'utf8')
-          if (!source.includes("import ru from '../i18n/ru.json'")) {
-            source = source.replace(
-              "import de from '../i18n/de.json'\n",
-              "import de from '../i18n/de.json'\nimport ru from '../i18n/ru.json'\nimport uk from '../i18n/uk.json'\n",
-            )
-          }
-          source = source.replace(
-            /const dictionaries: Record<string, Dict> = \{ en, de(?:, ru, uk)? \}/,
-            'const dictionaries: Record<string, Dict> = { en, de, ru, uk }',
-          )
-          fs.writeFileSync(i18nPath, source)
-
-          for (const lang of ['en', 'de']) {
-            const path = `frontend/src/i18n/${lang}.json`
-            const data = JSON.parse(fs.readFileSync(path, 'utf8'))
-            data.settings.langRu = 'Русский'
-            data.settings.langUk = 'Українська'
-            fs.writeFileSync(path, JSON.stringify(data, null, 2) + '\n')
-          }
-          NODE
-
-      - name: Record new translation keys
-        shell: bash
-        run: |
-          set -euo pipefail
-          node <<'NODE'
-          const fs = require('fs')
-
-          function flatten(value, prefix = '', out = {}) {
-            for (const [key, child] of Object.entries(value)) {
-              const path = prefix ? `${prefix}.${key}` : key
-              if (typeof child === 'string') out[path] = child
-              else if (child && typeof child === 'object' && !Array.isArray(child)) flatten(child, path, out)
-            }
-            return out
-          }
-
-          const en = flatten(JSON.parse(fs.readFileSync('frontend/src/i18n/en.json', 'utf8')))
-          const report = { upstream: '1.2.49', ru: {}, uk: {} }
-          for (const lang of ['ru', 'uk']) {
-            const translated = flatten(JSON.parse(fs.readFileSync(`frontend/src/i18n/${lang}.json`, 'utf8')))
-            for (const [key, value] of Object.entries(en)) {
-              if (!(key in translated)) report[lang][key] = value
-            }
-          }
-          fs.writeFileSync('docs/UPSTREAM_1_2_49_I18N_MISSING.json', JSON.stringify(report, null, 2) + '\n')
-          console.log(`RU missing: ${Object.keys(report.ru).length}`)
-          console.log(`UK missing: ${Object.keys(report.uk).length}`)
-          NODE
-
-      - name: Commit staged upstream merge
-        shell: bash
-        env:
-          UPSTREAM_SHA: 513c85baf7d66954405fd241cdede41f97a8f3b2
-        run: |
-          set -euo pipefail
-          git add frontend/package.json frontend/src/lib/i18n.ts frontend/src/i18n/en.json frontend/src/i18n/de.json docs/UPSTREAM_1_2_49_I18N_MISSING.json
-          git diff --cached --check
-          git commit -m "chore: stage upstream FilaMan 1.2.49 (${UPSTREAM_SHA})"
+          git commit -m 'i18n: translate FilaMan 1.2.49 additions to RU and UK'
           git push origin HEAD:integration/upstream-1.2.49
